@@ -13,7 +13,7 @@ authors = [{name = "Chomp-Chomp contributors"}]
 dependencies = []
 
 [project.optional-dependencies]
-asr = ["faster-whisper>=1.1,<2"]
+asr = ["faster-whisper>=1.1,<2", "av>=11,<19"]
 dev = ["pytest>=8,<10"]
 
 [project.scripts]
