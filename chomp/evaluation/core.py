@@ -12,7 +12,6 @@ from hashlib import sha256
 from pathlib import Path, PureWindowsPath
 from typing import Any
 import json
-import math
 import os
 import tempfile
 
@@ -212,7 +211,7 @@ def read_annotations(
                 raise ClipLedgerError(f"Immutable {field} differs from manifest for {clip_id}")
 
         decision = row["decision"]
-        if decision is not None and decision not in DECISIONS:
+        if decision is not None and (not isinstance(decision, str) or decision not in DECISIONS):
             raise ClipLedgerError(f"{clip_id}: decision must be good/bad/uncertain/null")
         reviewer_id = row["reviewer_id"]
         if not isinstance(reviewer_id, str):
@@ -224,12 +223,12 @@ def read_annotations(
             if rating is not None and (type(rating) is not int or not 1 <= rating <= 5):
                 raise ClipLedgerError(f"{clip_id}: {field} must be 1..5 or null")
         for field in TECH_FIELDS:
-            if row[field] is not None and row[field] not in TECH:
+            if row[field] is not None and (not isinstance(row[field], str) or row[field] not in TECH):
                 raise ClipLedgerError(f"{clip_id}: {field} must be yes/no/n/a/null")
-        if row["duplicate_content"] is not None and row["duplicate_content"] not in DUPLICATE:
+        if row["duplicate_content"] is not None and (not isinstance(row["duplicate_content"], str) or row["duplicate_content"] not in DUPLICATE):
             raise ClipLedgerError(f"{clip_id}: duplicate_content must be yes/no/uncertain/null")
         category = row["failure_category"]
-        if category is not None and category not in FAILURES:
+        if category is not None and (not isinstance(category, str) or category not in FAILURES):
             raise ClipLedgerError(f"{clip_id}: invalid failure_category")
         if decision == "bad" and category is None:
             raise ClipLedgerError(f"{clip_id}: bad decision requires a failure_category")
