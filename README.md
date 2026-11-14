@@ -33,6 +33,18 @@ chomp --input "C:\path\recording.mp4" --rights-ref "creator-grant-001" --acknowl
 
 There is currently **no model-based semantic ranker**. API and external-agent adapters are reserved for a later step, so Chomp-Chomp does not depend on a desktop LLM. The current score is a heuristic for experimenting, **not** a viral-moment prediction.
 
+## ASR compatibility troubleshooting
+
+If transcription fails with `open() got an unexpected keyword argument 'metadata_errors'`, the installed PyAV version is incompatible with the current released `faster-whisper`. Until faster-whisper publishes a compatible release, Chomp-Chomp constrains the ASR extra to `av>=11,<19`. For an existing virtual environment, run:
+
+```powershell
+python -m pip install "av==18.1.0"
+python -m pip check
+chomp --input "test.mp4" --rights-ref "authorized-test" --acknowledge-permission --transcribe --render
+```
+
+Use an actual authorized local file and reference in place of these examples. This compatibility fix does not change AI-model weights or require a fresh transcription model download.
+
 ## Inputs
 
 `transcript.json` (times in seconds or `start_ms`/`end_ms`):
