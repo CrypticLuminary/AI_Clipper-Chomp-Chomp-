@@ -77,3 +77,26 @@ def test_pipeline_preserves_main_streamer_attribution(tmp_path: Path):
     assert "main_streamer" in roles and "other_speaker" in roles
     with pytest.raises(ValueError,match="does not occur"):
         process(source,tmp_path/"review",rights_ref="fixture",transcript_path=transcript,min_score=0,main_speaker_id="S9")
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg not installed")
+def test_render_with_spaces_in_paths_and_caption_file(tmp_path: Path):
+    """Regression for Windows paths with spaces and FFmpeg subtitles."""
+    from chomp.media import exported_audio_level, render_preview
+    folder = tmp_path / "workspace with spaces" / "export directory"
+    folder.mkdir(parents=True)
+    source = folder / "input with spaces.mp4"
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error",
+        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12:duration=3",
+        "-f", "lavfi", "-i", "sine=frequency=700:duration=3",
+        "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+    ], check=True)
+    subtitles = folder / "candidate_01.srt"
+    subtitles.write_text("1\n00:00:00,200 --> 00:00:02,500\nHello, world!\n", encoding="utf-8")
+    output = folder / "candidate_01.mp4"
+    render_preview(source, output, 0, 2800, captions_path=subtitles)
+    meta = probe(output)
+    assert any(stream.get("codec_type") == "video" and stream.get("codec_name") == "h264" for stream in meta["streams"])
+    assert any(stream.get("codec_type") == "audio" and stream.get("codec_name") == "aac" for stream in meta["streams"])
+    assert exported_audio_level(output) > -45
