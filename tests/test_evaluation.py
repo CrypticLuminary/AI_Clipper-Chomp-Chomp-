@@ -433,3 +433,26 @@ def test_cli_template_validate_report_and_compare_with_spaces(tmp_path):
     invoke("compare", "--old-manifest", a, "--old-reviews", reviews_a,
            "--new-manifest", b, "--new-reviews", reviews_b, "--out", comparison_out)
     assert json.loads(comparison_out.read_text())["metric_deltas"]["interesting_rate"] == -1.0
+
+
+def test_reproducible_synthetic_demo_never_overwrites(tmp_path):
+    from chomp.evaluation.demo import generate
+    folder = tmp_path / "demo outputs with spaces"
+    created = generate(folder)
+    assert Path(created["comparison"]).is_file()
+    assert Path(created["old_review"]).is_file()
+    assert Path(created["new_review"]).is_file()
+    old = json.loads(Path(created["old_report"]).read_text(encoding="utf-8"))
+    new = json.loads(Path(created["new_report"]).read_text(encoding="utf-8"))
+    comparison = json.loads(Path(created["comparison"]).read_text(encoding="utf-8"))
+    assert old["precision_at_3"]["value"] is None  # synthetic uncertain label
+    assert old["interesting_rate"]["value"] == .5
+    assert new["precision_at_3"]["value"] == pytest.approx(2/3, abs=1e-6)
+    assert comparison["metric_deltas"]["interesting_rate"] == .166667
+    assert comparison["transitions_determinate_matched"] == {
+        "good_to_good": 1, "bad_to_good": 1,
+    }
+    original = Path(created["old_review"]).read_bytes()
+    with pytest.raises(FileExistsError):
+        generate(folder)
+    assert Path(created["old_review"]).read_bytes() == original
