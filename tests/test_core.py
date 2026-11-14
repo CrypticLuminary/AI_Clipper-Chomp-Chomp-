@@ -63,3 +63,34 @@ def test_json_milliseconds_and_seconds(tmp_path: Path):
     chatfile=tmp_path/"chat.json"
     chatfile.write_text(json.dumps([{"time":3,"user_id":"u1","text":"clip"}]))
     assert read_chat(chatfile,8000,offset_ms=500)[0].time_ms==3500
+
+
+def test_boundary_refinement_includes_neighboring_speech_and_caps():
+    from chomp.boundaries import refine_boundaries
+    c = Candidate(18_000, 29_000, 23_000, observations=[])
+    segs = [TranscriptSegment(13_000,20_000,"setup"), TranscriptSegment(25_000,36_000,"payoff")]
+    out = refine_boundaries(c,segs,100_000,max_length_ms=50_000)
+    assert out.start_ms <= 13_000 and out.end_ms >= 36_000
+    assert c.start_ms == out.start_ms and c.anchor_ms >= c.start_ms
+    too_long = Candidate(10_000,100_000,70_000)
+    out2 = refine_boundaries(too_long,[],120_000,max_length_ms=30_000)
+    assert out2.end_ms-out2.start_ms==30_000
+    assert out2.start_ms <= too_long.anchor_ms <= out2.end_ms
+
+
+def test_caption_generation_is_clip_local_and_sanitized():
+    from chomp.captions import make_srt
+    parts = [TranscriptSegment(3_000,8_000,"Setup <something>"), TranscriptSegment(9_000,13_000,"then a fun payoff!")]
+    srt,n = make_srt(parts,5_000,12_000,20_000)
+    assert n==2
+    assert "00:00:00,000 --> 00:00:03,000" in srt
+    assert "00:00:04,000 --> 00:00:07,000" in srt
+    assert "‹something›" in srt and "<something>" not in srt
+    assert make_srt([],5_000,12_000,20_000)==("",0)
+
+
+def test_boundary_rejects_invalid_config():
+    from chomp.boundaries import refine_boundaries
+    c=Candidate(1000,2000,1500)
+    with pytest.raises(ValueError):
+        refine_boundaries(c,[],10_000,max_length_ms=1000,min_length_ms=2000)

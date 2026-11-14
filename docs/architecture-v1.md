@@ -1,3 +1,5 @@
+> Implementation status (v0.2): audio/transcript/chat heuristic baseline, provisional transcript-assisted boundaries, segment-level SRT and optional manual facecam split. Meta/GPT/Claude APIs and agent workflows are intentionally deferred; later components in this document remain proposals.
+
 # Chomp-Chomp — Architecture Specification v1.0
 
 **Status:** Proposed architecture, not an implemented or benchmark-validated system  
@@ -165,7 +167,7 @@ Produce `setup → event → payoff → reaction`; sentence/pause boundaries are
 
 ## 6. Persistent jobs, files and execution model
 
-**Stack proposal:** Python 3.11+; FastAPI + Pydantic for optional local UI/API; SQLite WAL for job and artifact metadata; FFmpeg/ffprobe for media; yt-dlp only where authorized; faster-whisper/Whisper-family ASR baseline; pluggable local Ollama or approved API LLM; simple React or server-rendered review UI in a later increment.
+**Stack proposal:** Python 3.11+; FastAPI + Pydantic for optional local UI/API; SQLite WAL for job and artifact metadata; FFmpeg/ffprobe for media; yt-dlp only where authorized; faster-whisper/Whisper-family ASR baseline; future interchangeable approved API or agent ranking providers; simple React or server-rendered review UI in a later increment.
 
 Stage state transitions: `PENDING → RUNNING → SUCCEEDED | RETRYABLE_FAILED | BLOCKED | REJECTED`; `REVIEW_PENDING → APPROVED | REJECTED`. Every job carries its input fingerprint, source commit/config/model versions, artifact URI, checksum, retry count and error. Stage outputs are immutable and cache-keyed by **source ID, interval, asset hash, model, prompt/config and encoding profile**. No hard-coded shared temporary filenames.
 

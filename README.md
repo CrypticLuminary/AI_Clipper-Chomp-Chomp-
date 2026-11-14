@@ -1,10 +1,10 @@
 # Chomp-Chomp 🐊
 
-**Local-first, review-gated highlight discovery for authorized completed livestream recordings.**
+**Review-gated highlight discovery and export for authorized completed livestream recordings.**
 
 Chomp-Chomp is being developed in stages: (1) audio-first VOD analysis, (2) multiple VODs, (3) continuous livestream capture. We deliberately separate broad candidate discovery from semantic understanding, quality ranking, video editing and posting.
 
-> **Current status — v0.1.0 early baseline:** works with local video files. Uses FFmpeg to detect audio deviations, optional JSON transcripts and replay chat, configurable *local* Ollama interpretation, rank-first overlap removal, up to three review candidates, and optional letterboxed vertical MP4 preview exports. It **does not predict virality**, automatically discover all compelling moments, guarantee accurate reaction categories, retrieve remote stream links, detect facecams, or post to social platforms. ASR is optional, not installed by default.
+> **Current status — v0.2.0 early baseline:** accepts **local video recordings**, finds provisional highlights using FFmpeg audio peaks and optional transcripts/chat, ranks them with an *explicit heuristic baseline*, refines provisional boundaries using transcript segments, and selects up to three review candidates. With `--render` it exports 540×960 H.264/AAC videos, segment-timed SRT captions (burned in when present), and versioned edit specifications. A supplied facecam ROI enables a fixed facecam/gameplay split; without one, the full source remains visible with padding. **No LLM, Meta/GPT/Claude API, or agent integration is active yet.** Optional local ASR is not a language-model ranking service. No stream-URL fetching or automatic posting is implemented.
 
 ## Windows quick start
 
@@ -31,7 +31,7 @@ Offline/no-model evaluation with optional transcript and replay chat:
 chomp --input "C:\path\recording.mp4" --rights-ref "creator-grant-001" --acknowledge-permission --transcript transcript.json --chat chat.json --render
 ```
 
-You can supply `--ollama-model MODEL_NAME` if you have a local Ollama model running on `127.0.0.1:11434`. This attempts a **semantic** quality assessment of candidates. Without it, ranking is an explicit **heuristic baseline**, not an AI judgment. LLM failures revert to heuristics and are recorded in `warnings`.
+There is currently **no model-based semantic ranker**. API and external-agent adapters are reserved for a later step, so Chomp-Chomp does not depend on a desktop LLM. The current score is a heuristic for experimenting, **not** a viral-moment prediction.
 
 ## Inputs
 
@@ -51,15 +51,18 @@ Chat is optional, and its absence is **not** a zero/negative quality signal. For
 
 ## Outputs and limitations
 
-Each source gets an independent `outputs/<job_id>/review_queue.json`, optional `candidate_01.mp4` and so on. A SQLite `outputs/jobs.sqlite` tracks job states. All outputs are **pending human review** and publishing is disabled. The current MP4 preview keeps full source visible with padding; it does not pretend to detect facecams, and it isn't yet a fully branded campaign-ready cut.
+Each source gets an independent `outputs/<job_id>/review_queue.json`, `candidate_01.edit.json`, and, when a transcript is available, `candidate_01.srt`. With `--render`, it also generates a 540×960 captioned MP4. SQLite `outputs/jobs.sqlite` tracks job states. All exports are **pending human review** and publishing is disabled. Subtitle timings are based on source transcript segments; long segments are subdivided approximately and are **not word-level alignment**. If FFmpeg lacks the `subtitles` filter/libass, caption burn-in will fail clearly.
+
+To use a known facecam region in source pixels, add `--facecam-roi 1200,50,450,260` (adjust to the recording). It produces a fixed facecam-on-top/gameplay-below layout. Omit the setting for a full-source letterbox. The program does not automatically find facecams yet.
 
 Prioritization is provisional: a score is **not** a probability of future views. Audio spikes may be game effects, punctuation may not reflect excitement, and chat bursts may represent technical issues. Source-relative millisecond timestamps are used throughout. The same source with modified content can receive a different local job identity. Cache/provenance and crash recovery will be hardened before scalable batch execution.
 
 ## Roadmap
 
-- M0: typed source clocks, audio + transcript + chat inputs, baseline rank/select, review-only exports, regression tests. **Implemented in this branch.**
-- M1: benchmarked ASR, transcript chunking and semantic ranker with evidence validation; honest context/boundary expansion.
-- M2: selective VOD video retrieval for permitted platform sources; accurate facecam/gameplay vertical layouts, captions, edit manifests, technical verification.
+- M0: typed source clocks, audio + transcript + chat inputs, heuristic rank/select, review-only exports, regression tests. **Implemented.**
+- M0.5: provisional transcript-assisted boundaries, segment-level SRT, optional fixed facecam/gameplay layout, 9:16 output and editable render specifications. **Implemented (v0.2).**
+- M1: benchmarked ASR, transcript chunking, and model-agnostic semantic ranker with evidence validation; honest setup/payoff recovery. The ranker can later use authorized Meta/GPT/Claude APIs or agent workflows.
+- M2: selective VOD video retrieval for permitted platform sources; automatic/corrected facecam regions, word-level captions, campaign profiles, expanded technical verification.
 - M3: matched real-footage experiments comparing audio + transcript against optional chat; human precision@3.
 - M4: reliable bounded batch scheduler and stage cache.
 - M5: separate authorized paid-campaign trial with manual submission and tracked actual approvals/payouts.

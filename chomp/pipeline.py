@@ -10,9 +10,11 @@ import tempfile
 from datetime import datetime, timezone
 
 from .discovery import discover
+from .boundaries import refine_boundaries
+from .captions import make_srt
 from .media import probe, render_preview, scan_audio
 from .models import TranscriptSegment
-from .ranking import heuristic_rank, ollama_rank, select
+from .ranking import heuristic_rank, select
 from .signals import audio_observations, chat_observations, read_chat, read_transcript, transcript_observations
 
 
@@ -24,9 +26,11 @@ def _write_json(path: Path, value: object) -> None:
     tmp.replace(path)
 
 
-def _job_id(path: Path) -> str:
+def _job_id(path: Path, settings: dict) -> str:
+    """Key all output-affecting inputs so reruns cannot silently reuse stale edits."""
     stats = path.stat()
-    return sha256(f"{path.resolve()}:{stats.st_size}:{stats.st_mtime_ns}".encode()).hexdigest()[:16]
+    payload = {"media_path":str(path.resolve()),"media_size":stats.st_size,"media_mtime_ns":stats.st_mtime_ns,"settings":settings}
+    return sha256(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
 def transcribe_media(media: Path, model: str = "small", device: str = "cpu") -> list[dict]:
@@ -39,7 +43,7 @@ def transcribe_media(media: Path, model: str = "small", device: str = "cpu") -> 
     return [{"start_ms":round(s.start*1000), "end_ms":round(s.end*1000), "text":s.text} for s in output]
 
 
-def process(media: Path, output_root: Path, *, rights_ref: str, transcript_path: Path | None = None, chat_path: Path | None = None, chat_offset_ms: int = 0, transcribe: bool = False, asr_model: str = "small", asr_device: str = "cpu", ollama_model: str | None = None, min_score: float = 45, limit: int = 3, render: bool = False) -> dict:
+def process(media: Path, output_root: Path, *, rights_ref: str, transcript_path: Path | None = None, chat_path: Path | None = None, chat_offset_ms: int = 0, transcribe: bool = False, asr_model: str = "small", asr_device: str = "cpu", min_score: float = 45, limit: int = 3, render: bool = False, facecam_roi: tuple[int,int,int,int] | None = None) -> dict:
     if not rights_ref.strip():
         raise ValueError("A nonempty rights reference is required")
     if not 0 <= limit <= 10 or not 0 <= min_score <= 100:
@@ -47,7 +51,10 @@ def process(media: Path, output_root: Path, *, rights_ref: str, transcript_path:
     media = media.expanduser().resolve()
     meta = probe(media)
     duration_ms = meta["duration_ms"]
-    job_id = _job_id(media)
+    def _aux_identity(path: Path | None) -> str | None:
+        return sha256(path.read_bytes()).hexdigest() if path is not None else None
+    config = {"rights_ref":rights_ref, "transcript_hash":_aux_identity(transcript_path),"chat_hash":_aux_identity(chat_path),"chat_offset_ms":chat_offset_ms,"transcribe":transcribe,"asr_model":asr_model if transcribe else None,"asr_device":asr_device if transcribe else None,"min_score":min_score,"limit":limit,"render":render,"facecam_roi":facecam_roi,"pipeline_version":"0.2"}
+    job_id = _job_id(media,config)
     job_dir = output_root.resolve() / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     database = sqlite3.connect(output_root.resolve()/"jobs.sqlite")
@@ -68,22 +75,28 @@ def process(media: Path, output_root: Path, *, rights_ref: str, transcript_path:
         audio = scan_audio(media)
         observations = audio_observations(audio,duration_ms) + transcript_observations(transcript,duration_ms) + chat_observations(chat,duration_ms)
         candidates = discover(observations, transcript, duration_ms)
-        ranking_warnings = []
+        boundary_decisions = {}
         for c in candidates:
+            boundary_decisions[id(c)] = asdict(refine_boundaries(c, transcript, duration_ms))
             heuristic_rank(c)
-            if ollama_model:
-                try:
-                    ollama_rank(c, ollama_model)
-                except (ValueError, KeyError, RuntimeError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-                    ranking_warnings.append(f"LLM unavailable for candidate at {c.anchor_ms}: {str(exc)[:140]}")
+        ranking_warnings = []
         selected = select(candidates, max_clips=limit, min_score=min_score)
         assets = []
         for i,c in enumerate(selected,1):
             file_name = f"candidate_{i:02d}.mp4"
+            subtitles, cue_count = make_srt(transcript,c.start_ms,c.end_ms,duration_ms)
+            srt_name = f"candidate_{i:02d}.srt"
+            srt_path = job_dir/srt_name
+            if subtitles:
+                srt_path.write_text(subtitles, encoding="utf-8")
+            elif srt_path.exists():
+                srt_path.unlink()
             if render:
-                render_preview(media,job_dir/file_name,c.start_ms,c.end_ms)
-            assets.append({"candidate":c.to_dict(), "preview":str(job_dir/file_name) if render else None, "review_status":"pending", "publish_status":"disabled", "rights_ref":rights_ref})
-        manifest = {"schema_version":"0.1", "job_id":job_id,"source":str(media),"duration_ms":duration_ms,"rights_ref":rights_ref,"chat_status":"available" if chat else "missing","transcript_status":"available" if transcript else "missing", "ranking_notice":"Uncalibrated quality estimates; never validated virality predictions", "candidate_count":len(candidates),"selected_for_review":len(assets),"warnings":ranking_warnings,"clips":assets,"manual_review_required":True, "auto_publishing":False}
+                render_preview(media,job_dir/file_name,c.start_ms,c.end_ms,captions_path=srt_path if subtitles else None,facecam_roi=facecam_roi)
+            edit_spec = {"schema_version":"0.2", "source_start_ms":c.start_ms,"source_end_ms":c.end_ms,"layout":"fixed_facecam_split" if facecam_roi else "full_frame_letterbox","facecam_roi_px":list(facecam_roi) if facecam_roi else None,"caption_source":"provided_or_ASR_segments" if cue_count else "unavailable", "caption_timing":"segment_estimated_not_word_aligned" if cue_count else "unavailable","width":540,"height":960,"human_review_required":True}
+            _write_json(job_dir/f"candidate_{i:02d}.edit.json",edit_spec)
+            assets.append({"candidate":c.to_dict(),"boundary":boundary_decisions[id(c)],"edit_spec":str(job_dir/f"candidate_{i:02d}.edit.json"),"captions_srt":str(srt_path) if subtitles else None,"caption_cues":cue_count,"preview":str(job_dir/file_name) if render else None, "review_status":"pending", "publish_status":"disabled", "rights_ref":rights_ref})
+        manifest = {"schema_version":"0.2", "job_id":job_id,"source":str(media),"duration_ms":duration_ms,"rights_ref":rights_ref,"chat_status":"available" if chat else "missing","transcript_status":"available" if transcript else "missing", "ranking_notice":"Heuristic discovery/ranking only; NO AI model or agent integration is active. Not a virality predictor.", "candidate_count":len(candidates),"selected_for_review":len(assets),"warnings":ranking_warnings,"clips":assets,"manual_review_required":True, "auto_publishing":False}
         _write_json(job_dir/"review_queue.json",manifest)
         database.execute("UPDATE jobs SET status=?,modified_utc=? WHERE job_id=?",("review_pending",datetime.now(timezone.utc).isoformat(),job_id))
         database.commit()

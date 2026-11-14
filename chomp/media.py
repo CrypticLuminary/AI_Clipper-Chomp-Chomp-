@@ -71,12 +71,56 @@ def scan_audio(path: Path) -> list[float]:
     return curve
 
 
-def render_preview(source: Path, output: Path, start_ms: int, end_ms: int, width: int = 540, height: int = 960) -> None:
-    """Letterbox, never hide gameplay or invent a facecam. Preview requires review."""
+def render_preview(source: Path, output: Path, start_ms: int, end_ms: int, width: int = 540, height: int = 960, *, captions_path: Path | None = None, facecam_roi: tuple[int, int, int, int] | None = None) -> None:
+    """Produce a vertical review export with optional sidecar-SRT burn-in.
+
+    facecam_roi is x,y,w,h in *original source pixels*. Omit for a full-
+    frame letterbox preserving gameplay. No automatic facecam detection.
+    """
+    from .models import checked_span
+    meta = probe(source)
+    checked_span(start_ms, end_ms, meta["duration_ms"])
+    video = next((stream for stream in meta["streams"] if stream.get("codec_type") == "video"), None)
+    if not video:
+        raise ValueError("The source has no video stream to render")
     output.parent.mkdir(parents=True, exist_ok=True)
     duration = (end_ms - start_ms) / 1000
-    vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
-    exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error", "-ss", str(start_ms/1000), "-i", str(source), "-t", str(duration), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)])
-    # Fail loudly on invalid output. Codec verification also available through the review manifest.
+    base = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error", "-ss", str(start_ms/1000), "-i", str(source), "-t", str(duration)]
+    if facecam_roi is not None:
+        x,y,w,h = facecam_roi
+        vw,vh = int(video["width"]),int(video["height"])
+        if any(type(v) is not int for v in facecam_roi) or min(x,y)<0 or w<=0 or h<=0 or x+w>vw or y+h>vh:
+            raise ValueError("Facecam ROI must be within source video pixel dimensions")
+        top = round(height/3)
+        bottom = height-top
+        vf = (f"[0:v]split=2[face][game];"
+              f"[face]crop={w}:{h}:{x}:{y},scale={width}:{top}:force_original_aspect_ratio=increase,crop={width}:{top},setsar=1[faceout];"
+              f"[game]scale={width}:{bottom}:force_original_aspect_ratio=decrease,pad={width}:{bottom}:(ow-iw)/2:(oh-ih)/2,setsar=1[gameout];"
+              f"[faceout][gameout]vstack=inputs=2,format=yuv420p[stage]")
+    else:
+        vf = f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[stage]"
+    if captions_path is not None and captions_path.is_file() and captions_path.stat().st_size:
+        # Use a simple generated filename relative to cwd: avoids breaking the
+        # FFmpeg filter syntax with drive letters, quotes or source path chars.
+        if captions_path.parent.resolve() != output.parent.resolve() or not captions_path.name.startswith("candidate_") or captions_path.suffix.lower() != ".srt":
+            raise ValueError("Generated SRT must be beside the output with a candidate_ prefix")
+        vf += f";[stage]subtitles=filename={captions_path.name}:force_style='FontSize=22,Alignment=2,MarginV=90,Outline=2'[out]"
+        vmap = "[out]"
+    else:
+        vf += ";[stage]null[out]"
+        vmap = "[out]"
+    base += ["-filter_complex", vf, "-map", vmap, "-map", "0:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)]
+    try:
+        result = subprocess.run(base, text=True, capture_output=True, check=True, cwd=str(output.parent))
+    except FileNotFoundError as exc:
+        raise RuntimeError("FFmpeg is required") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Rendering failed: {exc.stderr[-1000:]}") from exc
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError("Render produced no media")
+    rendered = probe(output)
+    outvideo = next((s for s in rendered["streams"] if s.get("codec_type") == "video"), {})
+    if (outvideo.get("codec_name"),outvideo.get("width"),outvideo.get("height")) != ("h264",width,height):
+        raise RuntimeError("Rendered video did not pass H.264 portrait verification")
+    if not any(s.get("codec_type")=="audio" and s.get("codec_name")=="aac" for s in rendered["streams"]):
+        raise RuntimeError("Rendered clip is missing AAC audio")
