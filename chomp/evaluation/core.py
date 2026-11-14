@@ -490,6 +490,14 @@ def write_json(
     path = Path(output)
     if any(path.resolve() == Path(p).resolve() for p in protected):
         raise ClipLedgerError("Refusing to overwrite a manifest or human annotation file")
+    if path.exists():
+        existing = _object(_load_json(path), "existing report output")
+        if existing.get("schema_version") not in (
+            "clipledger-report/1", "clipledger-comparison/1"
+        ):
+            raise ClipLedgerError(
+                "Refusing to overwrite an existing file that is not a ClipLedger report"
+            )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
