@@ -6,7 +6,7 @@ Several coding agents work in parallel. A GitHub commit identifies the GitHub ac
 
 ## Unique identifiers
 
-- Task code and codename are stable across revisions: `GATE-01 / Watchtower` (CI), `FRAME-02 / Portrait` (media), `VOICE-03 / EchoMap` (diarization), `SCOUT-04 / Radar` (discovery), `JUDGE-05 / Lens` (semantic ranking), `CUT-06 / Cutline` (boundaries). New tasks get a new code, even when they touch an existing section; example `VOICE-03-FIX01 / ModelPaths`.
+- Task code and codename are stable across revisions: `GATE-01 / Watchtower` (CI), `FRAME-02 / Portrait` (media), `VOICE-03 / EchoMap` (diarization), `SCOUT-04 / Radar` (discovery), `JUDGE-05 / Lens` (semantic ranking), `CUT-06 / Cutline` (boundaries), `EVAL-07 / ClipLedger` (human review and measured clip quality). New tasks get a new code, even when they touch an existing section; example `VOICE-03-FIX01 / ModelPaths`.
 - Agent/model code identifies a **specific session/role**, not just a company: `GPT6-REVIEW`, `GPT6-DEV`, `OPUS46-AG`, `GFLASH38-AG`, `ARGON-GEM`, `GLM53`.
 - For multiple sessions of the same model, append a unique suffix, e.g. `GFLASH38-AG-B`.
 - A task may have several contributors or handoffs; keep all contributor codes and their scopes in chronological order. Do not claim the whole branch came from one model when responsibility changed.
@@ -61,6 +61,7 @@ Pending independent review.
 | Branch | Task | Attribution | Notes |
 | --- | --- | --- | --- |
 | `feat/stage1-speaker-diarization` | `VOICE-03` | **Unverified** | User described an Opus 4.6 → Gemini 3.8 Flash handoff, but code/commit ownership within the branch is not established. |
-| `feat/stage1-clip-boundaries` | `CUT-06` | **Unverified** | The branch may be from a separate GPT chat or another agent; the operator has not confirmed. |
+| `feat/stage1-clip-boundaries` | `CUT-06` | **User-reported GPT chat; exact model unverified** | 4/4 CI passed; real-VOD review pending before merge. |
+| `feat/eval07-gpt6-dev-clipledger` | `EVAL-07` | **Assigned to GPT coding chat; branch not yet created** | Implement offline human-review evaluation tooling, separate from clip selection. |
 
 **Review decisions:** Keep implementation approval independent from claimed model identity. Passing CI verifies certain tests, not real model accuracy or clip quality. Never mark an unknown model as confirmed merely because it shares the owner's GitHub credentials.
