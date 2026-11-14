@@ -39,7 +39,7 @@ def test_captioned_split_export_and_edit_spec(tmp_path: Path):
         assert Path(item["captions_srt"]).exists()
         assert item["boundary"]["method"].startswith("transcript_assisted")
         spec = json.loads(Path(item["edit_spec"]).read_text())
-        assert spec["layout"] == "fixed_facecam_split"
+        assert spec["layout"] == "facecam-gameplay"
         assert spec["facecam_roi_px"] == [200,0,110,80]
         info = probe(Path(item["preview"]))
         v=next(s for s in info["streams"] if s["codec_type"]=="video")
@@ -81,7 +81,7 @@ def test_pipeline_preserves_main_streamer_attribution(tmp_path: Path):
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg not installed")
 def test_render_with_spaces_in_paths_and_caption_file(tmp_path: Path):
-    """Regression for Windows paths with spaces and FFmpeg subtitles."""
+    """Regression for Windows paths such as 'D:\\AI _Clipper\\...' and FFmpeg's subtitles filter."""
     from chomp.media import exported_audio_level, render_preview
     folder = tmp_path / "workspace with spaces" / "export directory"
     folder.mkdir(parents=True)
@@ -100,3 +100,71 @@ def test_render_with_spaces_in_paths_and_caption_file(tmp_path: Path):
     assert any(stream.get("codec_type") == "video" and stream.get("codec_name") == "h264" for stream in meta["streams"])
     assert any(stream.get("codec_type") == "audio" and stream.get("codec_name") == "aac" for stream in meta["streams"])
     assert exported_audio_level(output) > -45
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg not installed")
+def test_manual_preview_facecam_gameplay_and_gameplay_only(tmp_path: Path):
+    from chomp.manual import render_manual_preview
+    from chomp.media import exported_audio_level
+    from chomp.models import checked_span
+    source = tmp_path / "video with spaces.mp4"
+    subprocess.run([
+        "ffmpeg","-hide_banner","-nostdin","-y","-v","error",
+        "-f","lavfi","-i","testsrc2=size=640x360:rate=12:duration=8",
+        "-f","lavfi","-i","sine=frequency=500:duration=8",
+        "-vf","drawbox=x=10:y=10:w=150:h=110:color=red:t=fill",
+        "-shortest","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac",str(source),
+    ],check=True)
+    cam = render_manual_preview(source, tmp_path/"output with spaces", rights_ref="test",
+                                start_s=1.1,end_s=4.6,layout="facecam-gameplay",
+                                facecam_roi=(10,10,150,110))
+    gameplay = render_manual_preview(source, tmp_path/"output with spaces", rights_ref="test",
+                                     start_s=1.1,end_s=4.6,layout="gameplay-only")
+    for result in (cam, gameplay):
+        media = probe(Path(result["preview"]))
+        stream = next(s for s in media["streams"] if s["codec_type"]=="video")
+        assert (stream["width"],stream["height"]) == (540,960)
+        assert abs(media["duration_ms"]-3500) < 500
+        assert result["audio_mean_dbfs"] > -50
+        assert Path(result["preview"]).is_file()
+    assert cam["layout"] == "facecam-gameplay"
+    assert gameplay["layout"] == "gameplay-only"
+    assert cam["job_id"] != gameplay["job_id"]
+
+
+def test_layout_validation():
+    from chomp.media import resolve_layout
+    assert resolve_layout("auto",(2,2,100,100)) == "facecam-gameplay"
+    assert resolve_layout("auto",None) == "gameplay-only"
+    with pytest.raises(ValueError,match="requires"):
+        resolve_layout("facecam-gameplay",None)
+    with pytest.raises(ValueError,match="Unknown"):
+        resolve_layout("not-a-layout",None)
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg not installed")
+def test_preview_selects_correct_audio_track(tmp_path: Path):
+    from chomp.media import render_preview, exported_audio_level
+    source=tmp_path/"two audio tracks.mp4"
+    subprocess.run([
+        "ffmpeg","-hide_banner","-nostdin","-y","-v","error",
+        "-f","lavfi","-i","testsrc2=size=320x180:rate=12:duration=3",
+        "-f","lavfi","-i","anullsrc=r=48000:cl=stereo",
+        "-f","lavfi","-i","sine=frequency=500:duration=3",
+        "-map","0:v:0","-map","1:a:0","-map","2:a:0",
+        "-t","3","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac",str(source),
+    ],check=True)
+    audible=tmp_path/"audible.mp4"
+    silent=tmp_path/"silent.mp4"
+    render_preview(source,audible,0,2500,audio_stream=1)
+    render_preview(source,silent,0,2500,audio_stream=0)
+    assert exported_audio_level(audible) > -45
+    assert exported_audio_level(silent) < -60
+    with pytest.raises(ValueError,match="unavailable"):
+        render_preview(source,tmp_path/"bad.mp4",0,2000,audio_stream=2)
+
+
+def test_manual_preview_rejects_invalid_timestamps_before_render(tmp_path: Path):
+    from chomp.manual import render_manual_preview
+    from chomp.media import resolve_layout
+    with pytest.raises(ValueError,match="finite"):
+        render_manual_preview(tmp_path/"missing.mp4",tmp_path,rights_ref="test",start_s=float("nan"),end_s=4)

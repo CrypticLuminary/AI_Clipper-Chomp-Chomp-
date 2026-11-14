@@ -57,6 +57,37 @@ chomp --input test.mp4 --rights-ref creator-consent --acknowledge-permission --t
 
 Candidate records include `speaker_context` with times, text, anonymous speaker IDs and explicit `main_streamer`, `other_speaker` or `unverified` roles. If speech crosses two voices, the segment remains unverified rather than guessing. The `--main-speaker-id` option rejects an ID that isn't present. **Speaker roles do not yet affect heuristic ranking**: teammates can deliver the payoff to a funny exchange. Chat messages are a different input from spoken voices. Next: an opt-in tested diarization/voice-reference stage or capture of separate mic tracks, with explicit permission and confidence thresholds.
 
+## Section 2: two vertical video formats and exact manual previews
+
+Chomp-Chomp now has **two primary 9:16 editing formats**:
+
+1. `facecam-gameplay`: the streamer webcam fills the top 35%, with gameplay underneath. **You must provide the webcam rectangle** using source-pixel coordinates (automatic facecam detection does not exist yet).
+2. `gameplay-only`: center-filled vertical gameplay footage without a separate facecam. This intentionally crops the left and right edges of 16:9 footage. Optionally use `--gameplay-roi` to choose the important region.
+
+`--layout auto` uses the first format if `--facecam-roi` is provided, otherwise the second. `--layout letterbox` remains available as a diagnostic legacy layout but is not a recommended social-video format. Since many streams have different webcam positions, use a frame from the original video to measure the webcam rectangle; do **not** blindly reuse the example coordinates.
+
+**Test an exact interval without the provisional highlight selector** (15 seconds, for example):
+
+```powershell
+chomp --input "test.mp4" --rights-ref "creator-permission" --acknowledge-permission --render --start 780 --end 795 --layout facecam-gameplay --facecam-roi "20,25,420,250"
+```
+
+Or gameplay-only:
+
+```powershell
+chomp --input "test.mp4" --rights-ref "creator-permission" --acknowledge-permission --render --start 780 --end 795 --layout gameplay-only
+```
+
+Replace timestamp/ROI values with real source locations. For game footage near the edge of the original frame, pass a separate `--gameplay-roi "x,y,w,h"`. Both modes use AAC stereo at 48 kHz; select an alternative audio track with `--audio-stream 1` (zero-based audio-track index) when the first track isn't the intended mix. Render output is saved under `outputs/manual-.../manual_preview.mp4` with a JSON report and optional SRT if a timestamped `--transcript` file is supplied. Manual mode deliberately bypasses semantic ranking; it doesn't automatically identify whether the segment is entertaining.
+
+Ordinary automatic runs also use the selected layout:
+
+```powershell
+chomp --input "test.mp4" --rights-ref "creator-permission" --acknowledge-permission --transcribe --render --layout gameplay-only
+```
+
+**Limitations:** webcam coordinates must be manually confirmed; gameplay-only center cropping may cut off HUD/important action, and speaker/source separation and semantic moment selection remain future features. No automatic upload or model/API calls are introduced by the layout options.
+
 ## Inputs
 
 `transcript.json` (times in seconds or `start_ms`/`end_ms`):
