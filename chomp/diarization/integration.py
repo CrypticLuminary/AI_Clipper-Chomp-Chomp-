@@ -73,11 +73,18 @@ def diarize_and_export(
     identity_path = output_dir / "speaker_identity_map.json"
     turns_path = output_dir / "speaker_turns.json"
 
-    # Fail closed before any expensive audio processing if identity map exists
+    # Fail closed before any expensive audio processing if either output file exists
+    conflicts: list[Path] = []
     if identity_path.exists():
+        conflicts.append(identity_path)
+    if turns_path.exists():
+        conflicts.append(turns_path)
+
+    if conflicts:
+        conflict_names = ", ".join(f"'{p}'" for p in conflicts)
         raise FileExistsError(
-            f"Speaker identity map already exists at '{identity_path}'. "
-            "Cannot overwrite existing identity mappings. "
+            f"Diarization output file already exists at {conflict_names}. "
+            "Cannot overwrite existing diarization output. "
             "Please choose a different output directory for new diarization runs."
         )
 
@@ -119,11 +126,22 @@ def diarize_and_export(
     identity_map = build_identity_map(speaker_ids)
     identity_map.save(identity_path)
 
-    # Export speaker turns JSON only after identity map is safely written
-    turns_path.write_text(
-        json.dumps(result.to_json_dict(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # Export speaker turns JSON using exclusive creation ("x" mode) to prevent
+    # race conditions or overwriting turns data if a turns file appeared after
+    # the preflight check.
+    # Note: If this exclusive write fails after identity_map.save() succeeded,
+    # the existing turns file is preserved byte-for-byte, though an unconfirmed
+    # identity map template was already written to this directory (non-atomic export).
+    turns_content = json.dumps(result.to_json_dict(), indent=2, ensure_ascii=False)
+    try:
+        with open(turns_path, "x", encoding="utf-8") as f:
+            f.write(turns_content)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f"Speaker turns file already exists at '{turns_path}'. "
+            "Cannot overwrite existing speaker turns data. "
+            "Please choose a different output directory for new diarization runs."
+        ) from exc
 
     return result, turns_path, identity_path
 
