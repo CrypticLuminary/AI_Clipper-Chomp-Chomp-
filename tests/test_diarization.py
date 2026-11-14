@@ -212,12 +212,21 @@ class TestDiarizationConfig:
         assert c.max_speakers == 6
         assert c.sample_rate == 16000
         assert c.backend == "auto"
+        assert c.segmentation_model is None
+        assert c.embedding_model is None
 
     def test_custom(self):
         from chomp.diarization.core import DiarizationConfig
-        c = DiarizationConfig(num_speakers=3, backend="resemblyzer")
+        c = DiarizationConfig(
+            num_speakers=3,
+            backend="sherpa",
+            segmentation_model=Path("models/seg.onnx"),
+            embedding_model="models/emb.onnx",
+        )
         assert c.num_speakers == 3
-        assert c.backend == "resemblyzer"
+        assert c.backend == "sherpa"
+        assert c.segmentation_model == Path("models/seg.onnx")
+        assert c.embedding_model == "models/emb.onnx"
 
     def test_frozen(self):
         from chomp.diarization.core import DiarizationConfig
@@ -380,6 +389,36 @@ class TestBackendAvailability:
              patch.object(core, "_SKLEARN_AVAILABLE", False):
             assert not core.check_backend_available()
 
+    def test_sherpa_config_requires_model_files(self, tmp_path):
+        from chomp.diarization import core
+        from chomp.diarization.core import DiarizationConfig
+        with patch.object(core, "_SHERPA_AVAILABLE", True), \
+             patch.object(core, "_RESEMBLYZER_AVAILABLE", False), \
+             patch.object(core, "_SKLEARN_AVAILABLE", False):
+            # No models configured -> False
+            c_no_models = DiarizationConfig(backend="sherpa")
+            assert not core.check_backend_available(c_no_models)
+
+            # Nonexistent models -> False
+            c_missing = DiarizationConfig(
+                backend="sherpa",
+                segmentation_model=tmp_path / "seg.onnx",
+                embedding_model=tmp_path / "emb.onnx",
+            )
+            assert not core.check_backend_available(c_missing)
+
+            # Existing model files -> True
+            seg = tmp_path / "seg.onnx"
+            emb = tmp_path / "emb.onnx"
+            seg.write_text("model")
+            emb.write_text("model")
+            c_ok = DiarizationConfig(
+                backend="sherpa",
+                segmentation_model=seg,
+                embedding_model=emb,
+            )
+            assert core.check_backend_available(c_ok)
+
 
 # ===================================================================
 # Mocked diarization (resemblyzer backend)
@@ -519,6 +558,11 @@ class TestDiarizeSherpaMocked:
         wav_path = tmp_path / "sherpa_test.wav"
         _write_wav(wav_path, audio, sr)
 
+        seg_file = tmp_path / "pyannote_seg.onnx"
+        seg_file.write_text("dummy seg")
+        emb_file = tmp_path / "campplus_emb.onnx"
+        emb_file.write_text("dummy emb")
+
         # Mock segment
         class MockSeg:
             def __init__(self, start, end, speaker):
@@ -546,7 +590,11 @@ class TestDiarizeSherpaMocked:
              patch("chomp.diarization.core.sherpa_onnx", mock_sherpa):
             result = diarize_audio(
                 wav_path, 10000,
-                DiarizationConfig(backend="sherpa")
+                DiarizationConfig(
+                    backend="sherpa",
+                    segmentation_model=seg_file,
+                    embedding_model=emb_file,
+                )
             )
 
         assert result.num_speakers_detected == 2
@@ -557,6 +605,252 @@ class TestDiarizeSherpaMocked:
         assert result.turns[0].end_ms == 3000
         assert result.turns[1].speaker_id == "SPEAKER_01"
         assert result.turns[2].speaker_id == "SPEAKER_00"
+
+        # Assert configured paths reached the constructors
+        mock_sherpa.OfflineSpeakerSegmentationPyannoteModelConfig.assert_called_once_with(
+            model=str(seg_file)
+        )
+        mock_sherpa.SpeakerEmbeddingExtractorConfig.assert_called_once_with(
+            model=str(emb_file),
+            num_threads=2,
+        )
+
+    def test_sherpa_model_paths_reach_constructor(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test_paths.wav"
+        _write_wav(wav_path, audio, sr)
+
+        seg_file = tmp_path / "models" / "segmentation.onnx"
+        seg_file.parent.mkdir(parents=True)
+        seg_file.write_text("seg model")
+        emb_file = tmp_path / "models" / "embedding.onnx"
+        emb_file.write_text("emb model")
+
+        mock_sherpa = MagicMock()
+        mock_sd = MagicMock()
+        mock_sd.sample_rate = 16000
+        mock_sd.process.return_value = []
+        mock_sherpa.OfflineSpeakerDiarization.return_value = mock_sd
+
+        config = DiarizationConfig(
+            backend="sherpa",
+            segmentation_model=str(seg_file),
+            embedding_model=str(emb_file),
+        )
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", mock_sherpa):
+            result = diarize_audio(wav_path, 10000, config)
+
+        assert result.method == "sherpa_onnx"
+        assert result.metadata["segmentation_model"] == str(seg_file)
+        assert result.metadata["embedding_model"] == str(emb_file)
+        mock_sherpa.OfflineSpeakerSegmentationPyannoteModelConfig.assert_called_with(
+            model=str(seg_file)
+        )
+        mock_sherpa.SpeakerEmbeddingExtractorConfig.assert_called_with(
+            model=str(emb_file),
+            num_threads=2,
+        )
+
+    def test_sherpa_missing_model_config_raises(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()):
+            with pytest.raises(ValueError, match="requires model paths to be configured"):
+                diarize_audio(wav_path, 10000, DiarizationConfig(backend="sherpa"))
+
+    def test_sherpa_missing_segmentation_config_raises(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        emb_file = tmp_path / "emb.onnx"
+        emb_file.write_text("model")
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()):
+            with pytest.raises(ValueError, match="segmentation_model"):
+                diarize_audio(
+                    wav_path, 10000,
+                    DiarizationConfig(backend="sherpa", embedding_model=emb_file)
+                )
+
+    def test_sherpa_missing_embedding_config_raises(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        seg_file = tmp_path / "seg.onnx"
+        seg_file.write_text("model")
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()):
+            with pytest.raises(ValueError, match="embedding_model"):
+                diarize_audio(
+                    wav_path, 10000,
+                    DiarizationConfig(backend="sherpa", segmentation_model=seg_file)
+                )
+
+    def test_sherpa_invalid_segmentation_path_raises(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        emb_file = tmp_path / "emb.onnx"
+        emb_file.write_text("model")
+        nonexistent_seg = tmp_path / "not_there_seg.onnx"
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()):
+            with pytest.raises(FileNotFoundError, match="segmentation model file not found"):
+                diarize_audio(
+                    wav_path, 10000,
+                    DiarizationConfig(
+                        backend="sherpa",
+                        segmentation_model=nonexistent_seg,
+                        embedding_model=emb_file,
+                    )
+                )
+
+    def test_sherpa_invalid_embedding_path_raises(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        seg_file = tmp_path / "seg.onnx"
+        seg_file.write_text("model")
+        nonexistent_emb = tmp_path / "not_there_emb.onnx"
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()):
+            with pytest.raises(FileNotFoundError, match="embedding model file not found"):
+                diarize_audio(
+                    wav_path, 10000,
+                    DiarizationConfig(
+                        backend="sherpa",
+                        segmentation_model=seg_file,
+                        embedding_model=nonexistent_emb,
+                    )
+                )
+
+    def test_sherpa_both_models_missing_raises(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()):
+            with pytest.raises(FileNotFoundError, match="model file\\(s\\) missing"):
+                diarize_audio(
+                    wav_path, 10000,
+                    DiarizationConfig(
+                        backend="sherpa",
+                        segmentation_model=tmp_path / "nonexistent_seg.onnx",
+                        embedding_model=tmp_path / "nonexistent_emb.onnx",
+                    )
+                )
+
+    def test_auto_backend_does_not_select_unconfigured_sherpa(self, tmp_path, sample_audio_16k):
+        """Task 6: Ensure auto backend selection does not treat an installed sherpa-ONNX
+
+        package as a fully configured, usable model when model paths are missing.
+        It must fall back to resemblyzer.
+        """
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        mock_sherpa = MagicMock()
+        mock_enc = MagicMock()
+        mock_enc.embed_utterance = lambda a, rate=1.6: np.ones(256, dtype=np.float32) / 16.0
+
+        mock_sc = MagicMock()
+        mock_sc.return_value.fit_predict = lambda X: np.zeros(X.shape[0], dtype=int)
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", mock_sherpa), \
+             patch("chomp.diarization.core._RESEMBLYZER_AVAILABLE", True), \
+             patch("chomp.diarization.core.VoiceEncoder", return_value=mock_enc), \
+             patch("chomp.diarization.core._SKLEARN_AVAILABLE", True), \
+             patch("chomp.diarization.core.SpectralClustering", mock_sc):
+            # auto backend without model paths configured
+            result = diarize_audio(wav_path, 10000, DiarizationConfig(backend="auto"))
+
+        # Must fall back to resemblyzer, NOT sherpa
+        assert "resemblyzer" in result.method
+        # sherpa must NOT have been called
+        assert not mock_sherpa.OfflineSpeakerDiarization.called
+
+    def test_auto_backend_selects_sherpa_when_models_present(self, tmp_path, sample_audio_16k):
+        """When sherpa is installed and model files exist, auto backend selects sherpa."""
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        seg_file = tmp_path / "seg.onnx"
+        seg_file.write_text("model")
+        emb_file = tmp_path / "emb.onnx"
+        emb_file.write_text("model")
+
+        mock_sherpa = MagicMock()
+        mock_sd = MagicMock()
+        mock_sd.sample_rate = 16000
+        mock_sd.process.return_value = []
+        mock_sherpa.OfflineSpeakerDiarization.return_value = mock_sd
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", mock_sherpa), \
+             patch("chomp.diarization.core._RESEMBLYZER_AVAILABLE", True):
+            result = diarize_audio(
+                wav_path, 10000,
+                DiarizationConfig(
+                    backend="auto",
+                    segmentation_model=seg_file,
+                    embedding_model=emb_file,
+                )
+            )
+
+        assert result.method == "sherpa_onnx"
+        assert mock_sherpa.OfflineSpeakerDiarization.called
+
+    def test_auto_backend_fails_gracefully_when_sherpa_installed_without_models_and_no_fallback(
+        self, tmp_path, sample_audio_16k
+    ):
+        """If sherpa is installed without models, and resemblyzer is missing, raise clear error."""
+        from chomp.diarization.core import DiarizationConfig, diarize_audio
+
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "test.wav"
+        _write_wav(wav_path, audio, sr)
+
+        with patch("chomp.diarization.core._SHERPA_AVAILABLE", True), \
+             patch("chomp.diarization.core.sherpa_onnx", MagicMock()), \
+             patch("chomp.diarization.core._RESEMBLYZER_AVAILABLE", False), \
+             patch("chomp.diarization.core.VoiceEncoder", None):
+            with pytest.raises(RuntimeError, match="model files were not configured"):
+                diarize_audio(wav_path, 10000, DiarizationConfig(backend="auto"))
 
     def test_sherpa_missing_raises(self, tmp_path, sample_audio_16k):
         from chomp.diarization.core import DiarizationConfig, diarize_audio
@@ -836,4 +1130,55 @@ class TestDiarizationCLI:
              )):
             code = main(["--media", str(wav_path), "--output", str(out_dir)])
             assert code == 0
+
+    def test_cli_passes_model_paths_to_config(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.__main__ import main
+        from chomp.diarization.core import DiarizationResult
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "input.wav"
+        _write_wav(wav_path, audio, sr)
+        out_dir = tmp_path / "out"
+
+        seg_file = tmp_path / "seg.onnx"
+        seg_file.write_text("model")
+        emb_file = tmp_path / "emb.onnx"
+        emb_file.write_text("model")
+
+        mock_result = DiarizationResult(
+            turns=[], num_speakers_detected=0, method="test",
+        )
+        captured_config = []
+
+        def mock_export(media, output_dir, *, duration_ms=None, config=None, audio_stream=0):
+            captured_config.append(config)
+            return mock_result, out_dir / "turns.json", out_dir / "id.json"
+
+        with patch("chomp.diarization.__main__.check_backend_available", return_value=True), \
+             patch("chomp.diarization.__main__.diarize_and_export", side_effect=mock_export):
+            code = main([
+                "--media", str(wav_path),
+                "--output", str(out_dir),
+                "--backend", "sherpa",
+                "--segmentation-model", str(seg_file),
+                "--embedding-model", str(emb_file),
+            ])
+            assert code == 0
+
+        assert len(captured_config) == 1
+        assert captured_config[0].segmentation_model == seg_file
+        assert captured_config[0].embedding_model == emb_file
+        assert captured_config[0].backend == "sherpa"
+
+    def test_cli_sherpa_unconfigured_fails(self, tmp_path, sample_audio_16k):
+        from chomp.diarization.__main__ import main
+        audio, sr = sample_audio_16k
+        wav_path = tmp_path / "input.wav"
+        _write_wav(wav_path, audio, sr)
+
+        from chomp.diarization import core
+        with patch.object(core, "_SHERPA_AVAILABLE", True), \
+             patch.object(core, "sherpa_onnx", MagicMock()):
+            # sherpa requested without model files -> check_backend_available(config) is False -> returns 1
+            code = main(["--media", str(wav_path), "--backend", "sherpa"])
+            assert code == 1
 
