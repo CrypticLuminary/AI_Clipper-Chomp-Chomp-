@@ -35,12 +35,17 @@ def heuristic_rank(candidate: Candidate) -> Candidate:
 
 
 def overlap_ratio(a: Candidate, b: Candidate) -> float:
-    common = max(0, min(a.end_ms,b.end_ms)-max(a.start_ms,b.start_ms))
-    union = max(a.end_ms,b.end_ms)-min(a.start_ms,b.start_ms)
-    return common/union if union else 0
+    """Overlap relative to the *shorter* clip, not the union.
+
+    Wide context windows can have low union IoU while still recycling a large
+    portion of the shorter clip. Such near-repeats should not fill a top-3.
+    """
+    common = max(0, min(a.end_ms, b.end_ms) - max(a.start_ms, b.start_ms))
+    shorter = min(a.end_ms-a.start_ms, b.end_ms-b.start_ms)
+    return common / shorter if shorter > 0 else 0
 
 
-def select(candidates: list[Candidate], max_clips: int=3, min_score: float=45, overlap_threshold: float=.35) -> list[Candidate]:
+def select(candidates: list[Candidate], max_clips: int=3, min_score: float=45, overlap_threshold: float=.25) -> list[Candidate]:
     """Rank FIRST, suppress overlapping lower-ranked duplicates second, allow zero clips."""
     result: list[Candidate] = []
     for c in sorted(candidates, key=lambda x: x.score, reverse=True):

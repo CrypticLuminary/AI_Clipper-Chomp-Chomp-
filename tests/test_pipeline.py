@@ -44,3 +44,36 @@ def test_captioned_split_export_and_edit_spec(tmp_path: Path):
         info = probe(Path(item["preview"]))
         v=next(s for s in info["streams"] if s["codec_type"]=="video")
         assert (v["width"],v["height"],v["codec_name"]) == (540,960,"h264")
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg not installed")
+def test_export_has_decodable_non_silent_audio_and_short_captions(tmp_path: Path):
+    from chomp.media import exported_audio_level, render_preview
+    from chomp.captions import _chunks
+    source=tmp_path/"short.mp4"
+    subprocess.run(["ffmpeg","-hide_banner","-nostdin","-y","-v","error",
+      "-f","lavfi","-i","testsrc2=size=320x180:rate=12:duration=6",
+      "-f","lavfi","-i","sine=frequency=600:duration=6",
+      "-shortest","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac",str(source)],check=True)
+    out=tmp_path/"candidate_01.mp4"
+    srt=tmp_path/"candidate_01.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:05,000\nWait, what just happened?\n", encoding="utf8")
+    render_preview(source,out,0,5000,captions_path=srt)
+    assert exported_audio_level(out) > -45
+    assert any(s["codec_type"]=="audio" for s in probe(out)["streams"])
+    assert all(len(chunk)<=28 for chunk in _chunks("Healing look at that. Look at that. I will play what the team needs."))
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg not installed")
+def test_pipeline_preserves_main_streamer_attribution(tmp_path: Path):
+    source=tmp_path/"speaker.mp4"
+    subprocess.run(["ffmpeg","-hide_banner","-nostdin","-y","-v","error", "-f","lavfi","-i","testsrc2=size=320x180:rate=12:duration=12", "-f","lavfi","-i","sine=frequency=600:duration=12", "-shortest","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac",str(source)],check=True)
+    transcript=tmp_path/"labelled.json"
+    transcript.write_text(json.dumps({"segments":[{"start":1,"end":5,"text":"Streamer's speech", "speaker_id":"S0"}, {"start":6,"end":10,"text":"Another person's speech","speaker_id":"S1"}]}))
+    outcome=process(source,tmp_path/"review", rights_ref="fixture",transcript_path=transcript,min_score=0,main_speaker_id="S0")
+    assert outcome["main_speaker_id"]=="S0"
+    assert outcome["speaker_attribution_status"]=="transcript_labelled"
+    roles={s["role"] for c in outcome["clips"] for s in c["candidate"]["speaker_context"]}
+    assert "main_streamer" in roles and "other_speaker" in roles
+    with pytest.raises(ValueError,match="does not occur"):
+        process(source,tmp_path/"review",rights_ref="fixture",transcript_path=transcript,min_score=0,main_speaker_id="S9")

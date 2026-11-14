@@ -17,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--transcript", help="optional JSON segments with start/end in seconds or start_ms/end_ms")
     p.add_argument("--chat", help="optional JSON replay with time/user_id/text")
     p.add_argument("--chat-offset-ms", type=int, default=0)
+    p.add_argument("--speaker-turns", help="optional external diarization JSON: anonymous speaker turns")
+    p.add_argument("--main-speaker-id", help="confirmed streamer ID from labelled transcript/diarization; never inferred")
     p.add_argument("--transcribe", action="store_true", help="run local faster-whisper if --transcript absent")
     p.add_argument("--asr-model", default="small")
     p.add_argument("--asr-device", choices=["cpu", "cuda"], default="cpu")
@@ -27,8 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if not args.acknowledge_permission:
         p.error("--acknowledge-permission required; a URL/file alone does not grant reuse rights")
-    if len(args.input)>1 and (args.chat or args.transcript):
-        p.error("--chat / --transcript currently apply to one input at a time")
+    if len(args.input)>1 and (args.chat or args.transcript or args.speaker_turns or args.main_speaker_id):
+        p.error("--chat / --transcript / speaker options currently apply to one input at a time")
     roi = None
     if args.facecam_roi:
         try:
@@ -41,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     success = 0
     for src in args.input:
         try:
-            result = process(Path(src),Path(args.output),rights_ref=args.rights_ref, transcript_path=Path(args.transcript) if args.transcript else None,chat_path=Path(args.chat) if args.chat else None,chat_offset_ms=args.chat_offset_ms,transcribe=args.transcribe,asr_model=args.asr_model,asr_device=args.asr_device,min_score=args.min_score,limit=args.max_clips,render=args.render,facecam_roi=roi)
+            result = process(Path(src),Path(args.output),rights_ref=args.rights_ref, transcript_path=Path(args.transcript) if args.transcript else None,chat_path=Path(args.chat) if args.chat else None,chat_offset_ms=args.chat_offset_ms,speaker_turns_path=Path(args.speaker_turns) if args.speaker_turns else None,main_speaker_id=args.main_speaker_id,transcribe=args.transcribe,asr_model=args.asr_model,asr_device=args.asr_device,min_score=args.min_score,limit=args.max_clips,render=args.render,facecam_roi=roi)
         except Exception as exc:
             print(json.dumps({"source":src,"error":str(exc)}))
             continue

@@ -4,6 +4,7 @@ from __future__ import annotations
 from array import array
 import json
 import math
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -71,6 +72,22 @@ def scan_audio(path: Path) -> list[float]:
     return curve
 
 
+def exported_audio_level(path: Path) -> float:
+    """Decode the *rendered* audio and report mean dBFS.
+
+    A stream can exist but be silent: checking only AAC codec presence is not
+    sufficient. -inf means complete digital silence. This is a diagnostic,
+    not a reason to drop intentional quiet gameplay footage.
+    """
+    result = exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path),
+                           "-map", "0:a:0", "-vn", "-af", "volumedetect",
+                           "-f", "null", "-"])
+    match = re.search(r"mean_volume:\s*(-?inf|-?\d+(?:\.\d+)?) dB", result.stderr)
+    if match is None:
+        raise RuntimeError("Unable to measure decoded export audio level")
+    return float(match.group(1))
+
+
 def render_preview(source: Path, output: Path, start_ms: int, end_ms: int, width: int = 540, height: int = 960, *, captions_path: Path | None = None, facecam_roi: tuple[int, int, int, int] | None = None) -> None:
     """Produce a vertical review export with optional sidecar-SRT burn-in.
 
@@ -104,12 +121,12 @@ def render_preview(source: Path, output: Path, start_ms: int, end_ms: int, width
         # FFmpeg filter syntax with drive letters, quotes or source path chars.
         if captions_path.parent.resolve() != output.parent.resolve() or not captions_path.name.startswith("candidate_") or captions_path.suffix.lower() != ".srt":
             raise ValueError("Generated SRT must be beside the output with a candidate_ prefix")
-        vf += f";[stage]subtitles=filename={captions_path.name}:force_style='FontSize=22,Alignment=2,MarginV=90,Outline=2'[out]"
+        vf += f";[stage]subtitles=filename={captions_path.name}:force_style='FontName=Arial,FontSize=10,Alignment=2,MarginV=24,Outline=1,Shadow=0'[out]"
         vmap = "[out]"
     else:
         vf += ";[stage]null[out]"
         vmap = "[out]"
-    base += ["-filter_complex", vf, "-map", vmap, "-map", "0:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output)]
+    base += ["-filter_complex", vf, "-map", vmap, "-map", "0:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", "-disposition:a:0", "default", "-movflags", "+faststart", str(output)]
     try:
         result = subprocess.run(base, text=True, capture_output=True, check=True, cwd=str(output.parent))
     except FileNotFoundError as exc:

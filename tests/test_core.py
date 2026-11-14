@@ -94,3 +94,41 @@ def test_boundary_rejects_invalid_config():
     c=Candidate(1000,2000,1500)
     with pytest.raises(ValueError):
         refine_boundaries(c,[],10_000,max_length_ms=1000,min_length_ms=2000)
+
+
+def test_top_three_does_not_repeat_large_part_of_shorter_clip():
+    # Real VOD regression: 6:33-7:22 and 7:02-7:59 share ~20 s.
+    high = Candidate(422230,478880,437550,score=61)
+    duplicate = Candidate(393790,442050,407490,score=49)
+    distinct = Candidate(770000,805000,782000,score=55)
+    assert select([duplicate, distinct, high],min_score=45)==[high, distinct]
+    from chomp.ranking import overlap_ratio
+    assert overlap_ratio(high,duplicate) > .4
+
+
+def test_speaker_turns_and_conservative_attribution(tmp_path: Path):
+    from chomp.speakers import read_speaker_turns, attribute_segments, speaker_inventory, candidate_speaker_context
+    from chomp.models import TranscriptSegment
+    turns_file = tmp_path / "turns.json"
+    turns_file.write_text(json.dumps({"turns":[
+        {"start": 0, "end": 5, "speaker_id": "S0"},
+        {"start": 5, "end": 10, "speaker_id": "S1"}
+    ]}))
+    turns=read_speaker_turns(turns_file,10_000)
+    segs=[TranscriptSegment(1_000,3_000,"Streamer line"),
+          TranscriptSegment(4_000,6_000,"two people talk"),
+          TranscriptSegment(6_000,8_000,"Teammate line")]
+    labelled=attribute_segments(segs,turns)
+    assert [x.speaker_id for x in labelled]==["S0",None,"S1"]
+    assert speaker_inventory(labelled,turns,"S0")==["S0","S1"]
+    with pytest.raises(ValueError,match="does not occur"):
+        speaker_inventory(labelled,turns,"wrong")
+    context=candidate_speaker_context(labelled,0,9_000,"S0")
+    assert [c["role"] for c in context]==["main_streamer","unverified","other_speaker"]
+
+
+def test_transcript_speaker_label_preserved(tmp_path: Path):
+    path=tmp_path/"labelled.json"
+    path.write_text(json.dumps({"segments":[{"start_ms":100,"end_ms":700,"text":"Hello", "speaker_id":"SPEAKER_00"}]}))
+    transcript=read_transcript(path,1000)
+    assert transcript[0].speaker_id=="SPEAKER_00"

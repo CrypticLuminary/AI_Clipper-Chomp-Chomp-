@@ -28,7 +28,7 @@ def read_transcript(path: Path | None, duration_ms: int) -> list[TranscriptSegme
             start, end = int(item["start_ms"]), int(item["end_ms"])
         else:
             start, end = _secs_to_ms(item["start"]), _secs_to_ms(item["end"])
-        seg = TranscriptSegment(start, end, str(item["text"]))
+        seg = TranscriptSegment(start, end, str(item["text"]), item.get("speaker_id", item.get("speaker")))
         seg.validate(duration_ms)
         out.append(seg)
     return sorted(out, key=lambda s: (s.start_ms, s.end_ms))

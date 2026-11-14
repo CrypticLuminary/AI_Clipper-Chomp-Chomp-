@@ -20,11 +20,26 @@ class TranscriptSegment:
     start_ms: int
     end_ms: int
     text: str
+    speaker_id: str | None = None
 
     def validate(self, duration_ms: int) -> None:
         checked_span(self.start_ms, self.end_ms, duration_ms)
         if not isinstance(self.text, str):
             raise TypeError("transcript text must be a string")
+        if self.speaker_id is not None and (not isinstance(self.speaker_id, str) or not self.speaker_id.strip() or len(self.speaker_id)>96):
+            raise ValueError("speaker_id must be a nonempty identifier <=96 chars")
+
+
+@dataclass(frozen=True)
+class SpeakerTurn:
+    start_ms: int
+    end_ms: int
+    speaker_id: str
+
+    def validate(self, duration_ms: int) -> None:
+        checked_span(self.start_ms, self.end_ms, duration_ms)
+        if not isinstance(self.speaker_id, str) or not self.speaker_id.strip() or len(self.speaker_id) > 96:
+            raise ValueError("speaker_id must be a nonempty identifier <=96 chars")
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,7 @@ class Candidate:
     anchor_ms: int
     observations: list[Observation] = field(default_factory=list)
     transcript_excerpt: str = ""
+    speaker_context: list[dict] = field(default_factory=list)
     categories: list[str] = field(default_factory=lambda: ["other"])
     scores: dict[str, float] = field(default_factory=dict)
     score: float = 0.0

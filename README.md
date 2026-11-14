@@ -4,7 +4,7 @@
 
 Chomp-Chomp is being developed in stages: (1) audio-first VOD analysis, (2) multiple VODs, (3) continuous livestream capture. We deliberately separate broad candidate discovery from semantic understanding, quality ranking, video editing and posting.
 
-> **Current status — v0.2.0 early baseline:** accepts **local video recordings**, finds provisional highlights using FFmpeg audio peaks and optional transcripts/chat, ranks them with an *explicit heuristic baseline*, refines provisional boundaries using transcript segments, and selects up to three review candidates. With `--render` it exports 540×960 H.264/AAC videos, segment-timed SRT captions (burned in when present), and versioned edit specifications. A supplied facecam ROI enables a fixed facecam/gameplay split; without one, the full source remains visible with padding. **No LLM, Meta/GPT/Claude API, or agent integration is active yet.** Optional local ASR is not a language-model ranking service. No stream-URL fetching or automatic posting is implemented.
+> **Current status — v0.3.0 early baseline:** accepts **local video recordings**, finds provisional highlights using FFmpeg audio peaks and optional transcripts/chat, ranks them with an *explicit heuristic baseline*, refines provisional boundaries using transcript segments, and selects up to three review candidates. With `--render` it exports 540×960 H.264/AAC videos, segment-timed SRT captions (burned in when present), and versioned edit specifications. A supplied facecam ROI enables a fixed facecam/gameplay split; without one, the full source remains visible with padding. **No LLM, Meta/GPT/Claude API, or agent integration is active yet.** Optional local ASR is not a language-model ranking service. No stream-URL fetching or automatic posting is implemented.
 
 ## Windows quick start
 
@@ -33,17 +33,29 @@ chomp --input "C:\path\recording.mp4" --rights-ref "creator-grant-001" --acknowl
 
 There is currently **no model-based semantic ranker**. API and external-agent adapters are reserved for a later step, so Chomp-Chomp does not depend on a desktop LLM. The current score is a heuristic for experimenting, **not** a viral-moment prediction.
 
-## ASR compatibility troubleshooting
+## Speaker identity (multiplayer/Discord/voice chat)
 
-If transcription fails with `open() got an unexpected keyword argument 'metadata_errors'`, the installed PyAV version is incompatible with the current released `faster-whisper`. Until faster-whisper publishes a compatible release, Chomp-Chomp constrains the ASR extra to `av>=11,<19`. For an existing virtual environment, run:
+The first real-world test showed why we must distinguish the main streamer from teammates, other spoken voices, and viewer text chat. **Whisper does not diarize or identify the main streamer**. Chomp-Chomp v0.3 supports speaker labels supplied by an external diarizer or a human, and stores a per-candidate speaker timeline. This is *not yet* automatic diarization or microphone source separation.
 
-```powershell
-python -m pip install "av==18.1.0"
-python -m pip check
-chomp --input "test.mp4" --rights-ref "authorized-test" --acknowledge-permission --transcribe --render
+Provide an existing labelled transcript: 
+
+```json
+{"segments": [{"start": 8.1, "end": 10.5, "speaker_id": "SPEAKER_00", "text": "Wait, did you see that?"}, {"start": 10.5, "end": 12.0, "speaker_id": "SPEAKER_01", "text": "No way!"}]}
 ```
 
-Use an actual authorized local file and reference in place of these examples. This compatibility fix does not change AI-model weights or require a fresh transcription model download.
+Or provide a separate diarization file such as `speaker_turns.json` alongside ordinary ASR:
+
+```json
+{"turns": [{"start": 8.0, "end": 10.5, "speaker_id": "SPEAKER_00"}, {"start": 10.5, "end": 12.2, "speaker_id": "SPEAKER_01"}]}
+```
+
+After **listening to the recording and confirming** which anonymous voice is the streamer:
+
+```powershell
+chomp --input test.mp4 --rights-ref creator-consent --acknowledge-permission --transcribe --speaker-turns speaker_turns.json --main-speaker-id SPEAKER_00 --render
+```
+
+Candidate records include `speaker_context` with times, text, anonymous speaker IDs and explicit `main_streamer`, `other_speaker` or `unverified` roles. If speech crosses two voices, the segment remains unverified rather than guessing. The `--main-speaker-id` option rejects an ID that isn't present. **Speaker roles do not yet affect heuristic ranking**: teammates can deliver the payoff to a funny exchange. Chat messages are a different input from spoken voices. Next: an opt-in tested diarization/voice-reference stage or capture of separate mic tracks, with explicit permission and confidence thresholds.
 
 ## Inputs
 
@@ -73,6 +85,7 @@ Prioritization is provisional: a score is **not** a probability of future views.
 
 - M0: typed source clocks, audio + transcript + chat inputs, heuristic rank/select, review-only exports, regression tests. **Implemented.**
 - M0.5: provisional transcript-assisted boundaries, segment-level SRT, optional fixed facecam/gameplay layout, 9:16 output and editable render specifications. **Implemented (v0.2).**
+- M0.7: external speaker diarization labels and streamer-role contracts. **Implemented (v0.3; identification is manual, no automatic diarization yet).**
 - M1: benchmarked ASR, transcript chunking, and model-agnostic semantic ranker with evidence validation; honest setup/payoff recovery. The ranker can later use authorized Meta/GPT/Claude APIs or agent workflows.
 - M2: selective VOD video retrieval for permitted platform sources; automatic/corrected facecam regions, word-level captions, campaign profiles, expanded technical verification.
 - M3: matched real-footage experiments comparing audio + transcript against optional chat; human precision@3.
@@ -82,3 +95,23 @@ Prioritization is provisional: a score is **not** a probability of future views.
 - M7: live capture adapter and causal scoring.
 
 The detailed agreed [architecture](docs/architecture-v1.md) is a **design proposal**, not a claim about implemented features. Any borrowed code or model weights need independent commercial-license review. Don't submit clips without documented streamer and campaign rights.
+
+## What v0.2.1 repairs (quality/diagnostics)
+
+- Overlap suppression compares the shared interval with the shorter clip. Large repeats no longer pass because they have low intersection-over-union.
+- Review subtitles are broken into shorter, more readable cues and use a smaller style; still **segment-estimated**, not word-aligned.
+- Exports preserve stereo AAC audio at 48 kHz and report decoded mean audio dBFS in `review_queue.json`. A stream may be present but silent; this diagnostic checks actual samples.
+- The default vertical layout is still letterboxed. Use a correct source-specific `--facecam-roi` to get a preliminary split layout. Proper scene-aware edits need further development.
+- There is **no semantic AI ranker yet**, so v0.2.1 remains a technical prototype, not a reliable entertainment selector.
+
+If you cannot hear audio in a preview, first open the exported MP4 in VLC or another local player. To isolate audio playback on Windows, run `ffplay -nodisp -autoexit "outputs\<job_id>\candidate_01.mp4"` (replace `<job_id>` with the actual folder). A non-silent audio level in the manifest alongside local playback silence suggests a player, application, or output-device issue.
+
+## Real-video feedback: audio, duplicates and subtitle quality
+
+- Up to three clips are selected after duplicate suppression based on overlap with the *shorter* interval (not a loose union ratio); distinct moments should not reuse 20 seconds of the same scene.
+- Source speech captions are split into shorter cues and rendered at a more restrained font size. This is still approximate segment timing, not word alignment.
+- Exports use AAC stereo 48 kHz with audio decode/level diagnostics recorded as `audio_mean_dbfs` for every rendered clip. This checks that an AAC stream contains audible signal (but cannot test your sound device).
+- The unconfigured layout is still full-frame letterbox; it is a review preview, not a final competitive social-video edit.
+- **Poor candidate choice remains expected without a semantic model or agent.** Speaker tags are preserved for future AI interpretation but do not yet magically improve ranking.
+
+If an MP4 plays silently, test the file outside the chat preview in VLC or run `ffplay -nodisp -autoexit "outputs\YOUR_JOB_ID\candidate_01.mp4"`. Compare `audio_mean_dbfs` with -60 dBFS: a value near -24 dBFS confirms the export contains sound, even if a specific player/device is muted.

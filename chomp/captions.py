@@ -15,7 +15,7 @@ def _clock(milliseconds: int) -> str:
     return f"{hours:02}:{minutes:02}:{seconds:02},{millis:03}"
 
 
-def _chunks(text: str, maximum: int = 72) -> list[str]:
+def _chunks(text: str, maximum: int = 28) -> list[str]:
     clean = re.sub(r"\s+", " ", text).strip()
     # Stop user-supplied markup being interpreted as subtitle styling.
     clean = clean.replace("<", "‹").replace(">", "›").replace("{", "（").replace("}", "）")
