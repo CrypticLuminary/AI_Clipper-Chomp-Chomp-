@@ -231,10 +231,10 @@ def test_render_with_existing_ffmpeg_compositor_and_unicode_srt(tmp_path):
         '-f','lavfi','-i','sine=frequency=600:duration=3',
         '-shortest','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac',str(original),
     ],check=True)
-    subtitle = work / 'captions with spaces.srt'
+    subtitle = work / 'candidate_01.srt'
     txt,_ = make_srt([segment(250,2600,'नमस्ते Hello <safe>!')],0,3000,3000)
     subtitle.write_text(txt,encoding='utf-8')
-    export = work / 'rendered preview.mp4'
+    export = work / 'candidate_01.mp4'
     media.render_preview(original,export,0,3000,captions_path=subtitle)
     probed = media.probe(export)
     assert any(s.get('codec_type') == 'video' for s in probed['streams'])
