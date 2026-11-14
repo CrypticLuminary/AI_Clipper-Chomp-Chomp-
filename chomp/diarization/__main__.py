@@ -76,6 +76,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Confidence threshold for speaker clustering",
     )
     parser.add_argument(
+        "--segmentation-model",
+        type=Path,
+        default=None,
+        help="Path to sherpa-onnx segmentation ONNX model file",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        type=Path,
+        default=None,
+        help="Path to sherpa-onnx speaker embedding ONNX model file",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
@@ -88,23 +100,40 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s: %(message)s",
     )
 
-    if not check_backend_available():
-        print(
-            f"ERROR: Diarization backend unavailable.\n{BACKEND_UNAVAILABLE_REASON}",
-            file=sys.stderr,
-        )
-        return 1
-
-    if not args.media.exists():
-        print(f"ERROR: Media file not found: {args.media}", file=sys.stderr)
-        return 1
-
     config = DiarizationConfig(
         num_speakers=args.num_speakers,
         min_segment_ms=args.min_segment_ms,
         confidence_threshold=args.confidence_threshold,
         backend=args.backend,
+        segmentation_model=args.segmentation_model,
+        embedding_model=args.embedding_model,
     )
+
+    if not check_backend_available(config):
+        if args.backend == "sherpa":
+            print(
+                "ERROR: sherpa-onnx backend unavailable or model files not configured.\n"
+                "Ensure sherpa-onnx is installed and existing model files are specified via "
+                "--segmentation-model and --embedding-model.",
+                file=sys.stderr,
+            )
+        elif args.backend == "resemblyzer":
+            print(
+                f"ERROR: resemblyzer backend unavailable.\n{BACKEND_UNAVAILABLE_REASON}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ERROR: No usable diarization backend available.\n{BACKEND_UNAVAILABLE_REASON}\n"
+                "If using sherpa-onnx, ensure existing model files are provided via "
+                "--segmentation-model and --embedding-model.",
+                file=sys.stderr,
+            )
+        return 1
+
+    if not args.media.exists():
+        print(f"ERROR: Media file not found: {args.media}", file=sys.stderr)
+        return 1
 
     try:
         result, turns_path, id_path = diarize_and_export(
