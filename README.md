@@ -1,5 +1,24 @@
 # Chomp-Chomp 🐊
 
+## Agent / task registry (Stage 1)
+
+> **Task and model codenames are project labels, not GitHub identities.** Existing branch authorship cannot be proven from Git commits; unconfirmed entries stay `UNVERIFIED` until the operator confirms them. New agents must self-report their model, app, task ID, branch and PR in a dedicated task manifest.
+
+| Task code | Section | Model / agent code | Working branch | Review state |
+| --- | --- | --- | --- | --- |
+| `GATE-01` | CI and testing | `GPT6-REVIEW` | `feat/vod-foundation` | Automated CI passed |
+| `FRAME-02` | Video layouts and media export | `GPT6-REVIEW` | `feat/vod-foundation` | Implemented; real-footage review pending |
+| `VOICE-03` | Diarization and speaker IDs | **`UNVERIFIED`** | `feat/stage1-speaker-diarization` | Changes required; real backend unverified |
+| `SCOUT-04` | Broad highlight discovery | `ARGON-GEM` **(assigned, unverified)** | `feat/stage1-discovery` **(not confirmed created)** | Awaiting implementation/review |
+| `JUDGE-05` | Semantic highlight interpretation and ranking | `GLM53` **(planned)** | Not created | Deferred; no API integration |
+| `CUT-06` | Clip boundary refinement | **`UNVERIFIED`** | `feat/stage1-clip-boundaries` | CI passed; real-content review pending |
+
+**Model codes:** `GPT6-REVIEW` = GPT-6 review/coordinator chat; `GPT6-DEV` = other GPT-6 coding chat; `OPUS46-AG` = Claude Opus 4.6 Thinking in Antigravity; `GFLASH38-AG` = Gemini 3.8 Flash in Antigravity; `ARGON-GEM` = Argon in Gemini app; `GLM53` = GLM 5.3. These are internal labels, not independently verified claims of model authorship.
+
+**Rule for future branches:** `<TASK-CODE> / <MODEL-CODE>` must appear in the task manifest and PR title; branches follow `feat/<task-code-lower>-<model-code-lower>-description` where practical. Each agent edits *its own* `docs/tasks/<TASK-CODE>.md`, not this shared table; the reviewer updates this README after verifying provenance and integration. See [agent attribution rules](docs/agent-task-registry.md).
+
+---
+
 **Review-gated highlight discovery and export for authorized completed livestream recordings.**
 
 Chomp-Chomp is being developed in stages: (1) audio-first VOD analysis, (2) multiple VODs, (3) continuous livestream capture. We deliberately separate broad candidate discovery from semantic understanding, quality ranking, video editing and posting.
