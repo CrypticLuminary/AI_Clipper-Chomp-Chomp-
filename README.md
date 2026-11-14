@@ -6,12 +6,12 @@
 
 | Task code | Section | Model / agent code | Working branch | Review state |
 | --- | --- | --- | --- | --- |
-| `GATE-01` | CI and testing | `GPT6-REVIEW` | `feat/vod-foundation` | Automated CI passed |
-| `FRAME-02` | Video layouts and media export | `GPT6-REVIEW` | `feat/vod-foundation` | Implemented; real-footage review pending |
-| `VOICE-03` | Diarization and speaker IDs | **`UNVERIFIED`** | `feat/stage1-speaker-diarization` | Changes required; real backend unverified |
-| `SCOUT-04` | Broad highlight discovery | `ARGON-GEM` **(assigned, unverified)** | `feat/stage1-discovery` **(not confirmed created)** | Awaiting implementation/review |
-| `JUDGE-05` | Semantic highlight interpretation and ranking | `GLM53` **(planned)** | Not created | Deferred; no API integration |
-| `CUT-06` | Clip boundary refinement | **`UNVERIFIED`** | `feat/stage1-clip-boundaries` | CI passed; real-content review pending |
+| `GATE-01` **Watchtower** | CI and testing | `GPT6-REVIEW` | `feat/vod-foundation` | Automated CI passed |
+| `FRAME-02` **Portrait** | Video layouts and media export | `GPT6-REVIEW` | `feat/vod-foundation` | Implemented; real-footage review pending |
+| `VOICE-03` **EchoMap** | Diarization and speaker IDs | **`UNVERIFIED`** | `feat/stage1-speaker-diarization` | Changes required; real backend unverified |
+| `SCOUT-04` **Radar** | Broad highlight discovery | `ARGON-GEM` **(assigned, unverified)** | `feat/stage1-discovery` **(not confirmed created)** | Awaiting implementation/review |
+| `JUDGE-05` **Lens** | Semantic highlight interpretation and ranking | `GLM53` **(planned)** | Not created | Deferred; no API integration |
+| `CUT-06` **Cutline** | Clip boundary refinement | **`UNVERIFIED`** | `feat/stage1-clip-boundaries` | CI passed; real-content review pending |
 
 **Model codes:** `GPT6-REVIEW` = GPT-6 review/coordinator chat; `GPT6-DEV` = other GPT-6 coding chat; `OPUS46-AG` = Claude Opus 4.6 Thinking in Antigravity; `GFLASH38-AG` = Gemini 3.8 Flash in Antigravity; `ARGON-GEM` = Argon in Gemini app; `GLM53` = GLM 5.3. These are internal labels, not independently verified claims of model authorship.
 
