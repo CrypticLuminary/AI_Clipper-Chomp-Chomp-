@@ -91,6 +91,8 @@ The caption-specific tests cover short/long/fast/slow speech, overlapping and sa
 
 Initial isolated local run: **22 passed, 1 skipped**; the skipped item was the optional renderer test because the local working mirror contained only the caption and model modules. The CI matrix in the full repository is authoritative for FFmpeg integration and Windows/Python compatibility.
 
+**Verified full-repository GitHub Actions push run:** [CI #43612981921](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43612981921) completed **successfully** on Windows and Ubuntu, each with Python 3.11 and 3.13. The Ubuntu Python 3.13 log reports **46 tests passed in 7.04 seconds**, including the synthetic FFmpeg caption-rendering test. The other three jobs also passed. Earlier CI failed because the *test fixture*, not the caption algorithm, named the SRT outside the renderer's `candidate_*.srt` convention; that fixture was corrected without altering media code. These results verify mechanical integration, not real footage readability.
+
 ## 5. Known limitations / independent reviewer focus
 
 - **No true word alignment:** char-weighted time estimates may be inaccurate, especially at clipped segment boundaries or after ASR timestamp drift.
