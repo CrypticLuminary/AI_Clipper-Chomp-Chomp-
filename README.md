@@ -14,7 +14,8 @@
 | `CUT-06` **Cutline** | Clip boundary refinement | `GPT6-DEV` **(user-reported GPT chat; model unverified)** | `feat/stage1-clip-boundaries` | Technical checks passed; real-video review and integration pending |
 | `EVAL-07` **ClipLedger** | Human clip-quality review and evaluation | `GPT6-DEV` **(self-reported)** | `feat/eval07-gpt6-dev-clipledger` | Technical review passed, CI 4/4; human VOD evaluation pending |
 | `VOICE-03-FIX01` **ModelPaths** | Sherpa model loading fix | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix01-gflash38-ag-modelpaths` | Code review conditional pass; PR/CI and real-model smoke test pending |
-| `VOICE-03-FIX02` **IdentityGuard** | Protect speaker identity mappings | `GFLASH38-AG` **(assigned)** | `fix/voice03-fix02-gflash38-ag-identityguard` **(not created)** | Next small task |
+| `VOICE-03-FIX02` **IdentityGuard** | Protect speaker identity mappings | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix02-gflash38-ag-identityguard` | CI 4/4 passed; identity protection accepted conditionally; turns overwrite gap |
+| `VOICE-03-FIX03` **TurnsGuard** | Protect speaker-turn exports from overwrite | `GFLASH38-AG` **(assigned)** | `fix/voice03-fix03-gflash38-ag-turnsguard` **(not created)** | Small follow-up task |
 | `CAPT-08` **CaptionCraft** | Caption timing and readability | `GPT6-DEV` **(assigned)** | `feat/capt08-gpt6-dev-captioncraft` **(not created)** | Next GPT task |
 
 **Model codes:** `GPT6-REVIEW` = GPT-6 review/coordinator chat; `GPT6-DEV` = other GPT-6 coding chat; `OPUS46-AG` = Claude Opus 4.6 Thinking in Antigravity; `GFLASH38-AG` = Gemini 3.8 Flash in Antigravity; `ARGON-GEM` = Argon in Gemini app; `GLM53` = GLM 5.3. These are internal labels, not independently verified claims of model authorship.
