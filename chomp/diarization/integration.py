@@ -70,49 +70,60 @@ def diarize_and_export(
         )
 
     output_dir = output_dir.resolve()
+    identity_path = output_dir / "speaker_identity_map.json"
+    turns_path = output_dir / "speaker_turns.json"
+
+    # Fail closed before any expensive audio processing if identity map exists
+    if identity_path.exists():
+        raise FileExistsError(
+            f"Speaker identity map already exists at '{identity_path}'. "
+            "Cannot overwrite existing identity mappings. "
+            "Please choose a different output directory for new diarization runs."
+        )
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Convert to WAV
     wav_path = output_dir / "diarization_input.wav"
-    logger.info("Converting %s to WAV for diarization", media_path)
-    convert_to_wav(media_path, wav_path, audio_stream=audio_stream)
+    try:
+        logger.info("Converting %s to WAV for diarization", media_path)
+        convert_to_wav(media_path, wav_path, audio_stream=audio_stream)
 
-    # Compute duration from WAV if not provided
-    if duration_ms is None:
-        import wave
-        with wave.open(str(wav_path), "rb") as wf:
-            duration_ms = int(wf.getnframes() / wf.getframerate() * 1000)
-    if duration_ms <= 0:
-        raise ValueError("Media has zero or negative duration")
+        # Compute duration from WAV if not provided
+        if duration_ms is None:
+            import wave
+            with wave.open(str(wav_path), "rb") as wf:
+                duration_ms = int(wf.getnframes() / wf.getframerate() * 1000)
+        if duration_ms <= 0:
+            raise ValueError("Media has zero or negative duration")
 
-    # Run diarization
-    logger.info("Running diarization (duration: %d ms)", duration_ms)
-    result = diarize_audio(wav_path, duration_ms, config)
-    logger.info(
-        "Diarization complete: %d speakers, %d turns, method=%s",
-        result.num_speakers_detected,
-        len(result.turns),
-        result.method,
-    )
+        # Run diarization
+        logger.info("Running diarization (duration: %d ms)", duration_ms)
+        result = diarize_audio(wav_path, duration_ms, config)
+        logger.info(
+            "Diarization complete: %d speakers, %d turns, method=%s",
+            result.num_speakers_detected,
+            len(result.turns),
+            result.method,
+        )
+    finally:
+        # Clean up WAV (it can be large)
+        try:
+            wav_path.unlink()
+        except OSError:
+            pass
 
-    # Export speaker turns JSON
-    turns_path = output_dir / "speaker_turns.json"
+    # Save identity map template FIRST using exclusive creation to ensure
+    # we never overwrite human work even in concurrent execution races.
+    speaker_ids = sorted({t.speaker_id for t in result.turns})
+    identity_map = build_identity_map(speaker_ids)
+    identity_map.save(identity_path)
+
+    # Export speaker turns JSON only after identity map is safely written
     turns_path.write_text(
         json.dumps(result.to_json_dict(), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-
-    # Export identity map template
-    speaker_ids = sorted({t.speaker_id for t in result.turns})
-    identity_map = build_identity_map(speaker_ids)
-    identity_path = output_dir / "speaker_identity_map.json"
-    identity_map.save(identity_path)
-
-    # Clean up WAV (it can be large)
-    try:
-        wav_path.unlink()
-    except OSError:
-        pass
 
     return result, turns_path, identity_path
 
