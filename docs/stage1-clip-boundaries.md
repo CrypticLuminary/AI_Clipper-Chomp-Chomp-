@@ -43,6 +43,9 @@ On Python 3.13.5, the new boundary-specific test module passed **22 tests** loca
 
 Baseline comparison executed on the original algorithm copied *verbatim* from the base branch, against the same synthetic fixtures:
 
+Reproduce the exact synthetic before/after fixture spans and a fresh timing microbenchmark with `python tests/bench_boundaries_stage1.py` from an editable install. The script retains a copy of the original 37d8ff2 timing implementation as its explicit baseline. The numbers below were obtained in the initial local run; measured runtimes vary by host.
+
+
 | Fixture | Before [start, end] ms / duration | After [start, end] ms / duration |
 | --- | --- | --- |
 | Short reaction | [34500, 63000] / 28.50s | [45150, 53150] / 8.00s |
