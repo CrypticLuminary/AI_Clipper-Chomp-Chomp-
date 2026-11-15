@@ -8,15 +8,15 @@
 | --- | --- | --- | --- | --- |
 | `GATE-01` **Watchtower** | CI and testing | `GPT6-REVIEW` | `feat/vod-foundation` | Automated CI passed |
 | `FRAME-02` **Portrait** | Video layouts and media export | `GPT6-REVIEW` | `feat/vod-foundation` | Implemented; real-footage review pending |
-| `VOICE-03` **EchoMap** | Diarization and speaker IDs | **`UNVERIFIED`** (original branch) | `feat/stage1-speaker-diarization` | Real backend still unverified |
+| `VOICE-03` **EchoMap** | Diarization and speaker IDs | **`UNVERIFIED`** (original branch) | `feat/stage1-speaker-diarization` | Parent PR missing; 3 fixes to integrate; real backend unverified |
 | `SCOUT-04` **Radar** | Broad highlight discovery | `ARGON-GEM` **(assigned, unverified)** | `feat/stage1-discovery` **(not confirmed created)** | Awaiting implementation/review |
 | `JUDGE-05` **Lens** | Semantic highlight interpretation and ranking | `GLM53` **(planned)** | Not created | Deferred; no API integration |
-| `CUT-06` **Cutline** | Clip boundary refinement | `GPT6-DEV` **(user-reported GPT chat; model unverified)** | `feat/stage1-clip-boundaries` | Technical checks passed; real-video review and integration pending |
-| `EVAL-07` **ClipLedger** | Human clip-quality review and evaluation | `GPT6-DEV` **(self-reported)** | `feat/eval07-gpt6-dev-clipledger` | Technical review passed, CI 4/4; human VOD evaluation pending |
-| `VOICE-03-FIX01` **ModelPaths** | Sherpa model loading fix | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix01-gflash38-ag-modelpaths` | Code review conditional pass; PR/CI and real-model smoke test pending |
-| `VOICE-03-FIX02` **IdentityGuard** | Protect speaker identity mappings | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix02-gflash38-ag-identityguard` | CI 4/4 passed; identity protection accepted conditionally; turns overwrite gap |
-| `VOICE-03-FIX03` **TurnsGuard** | Protect speaker-turn exports from overwrite | `GFLASH38-AG` **(assigned)** | `fix/voice03-fix03-gflash38-ag-turnsguard` **(not created)** | Small follow-up task |
-| `CAPT-08` **CaptionCraft** | Caption timing and readability | `GPT6-DEV` **(assigned)** | `feat/capt08-gpt6-dev-captioncraft` **(not created)** | Next GPT task |
+| `CUT-06` **Cutline** | Clip boundary refinement | `GPT6-DEV` **(user-reported GPT chat; model unverified)** | `feat/stage1-clip-boundaries` | PR #2 CI 4/4; technical pass, real-video review pending |
+| `EVAL-07` **ClipLedger** | Human clip-quality review and evaluation | `GPT6-DEV` **(self-reported)** | `feat/eval07-gpt6-dev-clipledger` | PR #3 CI 4/4; technical pass, human VOD review pending |
+| `VOICE-03-FIX01` **ModelPaths** | Sherpa model loading fix | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix01-gflash38-ag-modelpaths` | PR #4 CI 4/4; real ONNX model smoke test pending |
+| `VOICE-03-FIX02` **IdentityGuard** | Protect speaker identity mappings | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix02-gflash38-ag-identityguard` | PR #5 CI 4/4; technical pass, integrate FIX03 before parent |
+| `VOICE-03-FIX03` **TurnsGuard** | Protect speaker-turn exports from overwrite | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix03-gflash38-ag-turnsguard` | PR #7 CI 4/4; technical pass, shared WAV concurrency caveat |
+| `CAPT-08` **CaptionCraft** | Caption timing and readability | `GPT6-DEV` **(self-reported)** | `feat/capt08-gpt6-dev-captioncraft` | PR #6 CI 4/4; technical pass, real subtitle review pending |
 
 **Model codes:** `GPT6-REVIEW` = GPT-6 review/coordinator chat; `GPT6-DEV` = other GPT-6 coding chat; `OPUS46-AG` = Claude Opus 4.6 Thinking in Antigravity; `GFLASH38-AG` = Gemini 3.8 Flash in Antigravity; `ARGON-GEM` = Argon in Gemini app; `GLM53` = GLM 5.3. These are internal labels, not independently verified claims of model authorship.
 
