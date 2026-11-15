@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
+from ..media import SOURCE_CLOCK_AUDIO_FILTER
 from ..models import SpeakerTurn
 
 logger = logging.getLogger(__name__)
@@ -47,6 +46,11 @@ AgglomerativeClustering: Any = None
 _SHERPA_AVAILABLE = False
 _RESEMBLYZER_AVAILABLE = False
 _SKLEARN_AVAILABLE = False
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 try:
     import sherpa_onnx as _sherpa  # type: ignore[import-untyped]
@@ -82,6 +86,8 @@ def check_backend_available(config: DiarizationConfig | None = None) -> bool:
     - For 'resemblyzer', returns True if resemblyzer + sklearn are installed.
     - For 'auto', returns True if either backend is fully ready to run.
     """
+    if np is None:
+        return False
     sherpa_pkg = _SHERPA_AVAILABLE or sherpa_onnx is not None
     resemblyzer_ready = (_RESEMBLYZER_AVAILABLE or VoiceEncoder is not None) and (
         _SKLEARN_AVAILABLE or SpectralClustering is not None
@@ -104,6 +110,8 @@ def _get_backend_unavailable_reason() -> str | None:
     if check_backend_available():
         return None
     parts = []
+    if np is None:
+        parts.append("NumPy not installed")
     if not _SHERPA_AVAILABLE:
         parts.append("sherpa-onnx not installed (pip install sherpa-onnx)")
     if not _RESEMBLYZER_AVAILABLE:
@@ -246,6 +254,7 @@ def convert_to_wav(
         "ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error",
         "-i", str(input_path),
         "-map", f"0:a:{audio_stream}",
+        "-af", SOURCE_CLOCK_AUDIO_FILTER,
         "-ac", "1",
         "-ar", str(sample_rate),
         "-sample_fmt", "s16",
@@ -761,6 +770,8 @@ def diarize_audio(
         RuntimeError: If no backend is available.
         FileNotFoundError: If the audio file doesn't exist.
     """
+    if np is None:
+        raise RuntimeError(f"Diarization backend unavailable: {BACKEND_UNAVAILABLE_REASON}")
     if config is None:
         config = DiarizationConfig()
 

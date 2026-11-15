@@ -54,7 +54,26 @@ def process(media: Path, output_root: Path, *, rights_ref: str, transcript_path:
     duration_ms = meta["duration_ms"]
     def _aux_identity(path: Path | None) -> str | None:
         return sha256(path.read_bytes()).hexdigest() if path is not None else None
-    config = {"rights_ref":rights_ref, "transcript_hash":_aux_identity(transcript_path),"chat_hash":_aux_identity(chat_path),"speaker_turns_hash":_aux_identity(speaker_turns_path),"main_speaker_id":main_speaker_id,"chat_offset_ms":chat_offset_ms,"transcribe":transcribe,"asr_model":asr_model if transcribe else None,"asr_device":asr_device if transcribe else None,"min_score":min_score,"limit":limit,"render":render,"facecam_roi":facecam_roi,"gameplay_roi":gameplay_roi,"layout":layout,"audio_stream":audio_stream,"pipeline_version":"0.4.0"}
+    config = {
+        "rights_ref": rights_ref,
+        "transcript_hash": _aux_identity(transcript_path),
+        "chat_hash": _aux_identity(chat_path),
+        "speaker_turns_hash": _aux_identity(speaker_turns_path),
+        "main_speaker_id": main_speaker_id,
+        "chat_offset_ms": chat_offset_ms,
+        "transcribe": transcribe,
+        "asr_model": asr_model if transcribe else None,
+        "asr_device": asr_device if transcribe else None,
+        "min_score": min_score,
+        "limit": limit,
+        "render": render,
+        "facecam_roi": facecam_roi,
+        "gameplay_roi": gameplay_roi,
+        "layout": layout,
+        "audio_stream": audio_stream,
+        # Cutline and CaptionCraft may change timings and assets for the same inputs.
+        "pipeline_version": "0.4.0+integ09",
+    }
     job_id = _job_id(media,config)
     job_dir = output_root.resolve() / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -76,12 +95,12 @@ def process(media: Path, output_root: Path, *, rights_ref: str, transcript_path:
         transcript = attribute_segments(transcript, turns)
         speaker_ids = speaker_inventory(transcript, turns, main_speaker_id)
         chat = read_chat(chat_path, duration_ms, chat_offset_ms)
-        audio = scan_audio(media)
+        audio = scan_audio(media, audio_stream=audio_stream)
         observations = audio_observations(audio,duration_ms) + transcript_observations(transcript,duration_ms) + chat_observations(chat,duration_ms)
         candidates = discover(observations, transcript, duration_ms)
         boundary_decisions = {}
         for c in candidates:
-            boundary_decisions[id(c)] = asdict(refine_boundaries(c, transcript, duration_ms))
+            boundary_decisions[id(c)] = asdict(refine_boundaries(c, transcript, duration_ms, audio_levels=audio))
             c.speaker_context = candidate_speaker_context(transcript, c.start_ms, c.end_ms, main_speaker_id)
             heuristic_rank(c)
         ranking_warnings = []

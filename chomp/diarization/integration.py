@@ -20,6 +20,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+from ..media import probe
 from ..models import SpeakerTurn, TranscriptSegment
 from ..speakers import attribute_segments, read_speaker_turns
 from .core import (
@@ -54,7 +55,7 @@ def diarize_and_export(
     Parameters:
         media_path: Path to the source media file.
         output_dir: Where to write output files.
-        duration_ms: Total duration in ms.  If None, computed from the WAV.
+        duration_ms: Source duration in ms. If None, measured by FFprobe.
         config: Diarization configuration.
         audio_stream: Which audio stream to extract (0-based).
 
@@ -88,6 +89,13 @@ def diarize_and_export(
             "Please choose a different output directory for new diarization runs."
         )
 
+    # Use the same published media duration as --speaker-turns on re-import.
+    # Decoded AAC can contain frame padding beyond the container duration.
+    if duration_ms is None:
+        duration_ms = probe(media_path)["duration_ms"]
+    if duration_ms <= 0:
+        raise ValueError("Media has zero or negative duration")
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Convert to WAV
@@ -95,14 +103,6 @@ def diarize_and_export(
     try:
         logger.info("Converting %s to WAV for diarization", media_path)
         convert_to_wav(media_path, wav_path, audio_stream=audio_stream)
-
-        # Compute duration from WAV if not provided
-        if duration_ms is None:
-            import wave
-            with wave.open(str(wav_path), "rb") as wf:
-                duration_ms = int(wf.getnframes() / wf.getframerate() * 1000)
-        if duration_ms <= 0:
-            raise ValueError("Media has zero or negative duration")
 
         # Run diarization
         logger.info("Running diarization (duration: %d ms)", duration_ms)

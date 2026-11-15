@@ -10,6 +10,8 @@ import subprocess
 import sys
 
 SAMPLE_RATE = 2000  # low-cost detector, not ASR quality
+# Preserve the elapsed time before delayed audio packets when writing timestamp-free PCM.
+SOURCE_CLOCK_AUDIO_FILTER = "aresample=async=1:first_pts=0"
 
 
 def exec_checked(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -50,9 +52,13 @@ def rms_dbfs(data: bytes) -> float:
     return max(-90., min(0., 10 * math.log10(power / (32768**2))))
 
 
-def scan_audio(path: Path) -> list[float]:
-    """Stream downsampled PCM without writing 4-hour uncompressed audio to disk."""
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "pipe:1"]
+def scan_audio(path: Path, *, audio_stream: int = 0) -> list[float]:
+    """Stream one-second audio levels on the source clock from the selected track."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(path),
+        "-map", f"0:a:{audio_stream}", "-af", SOURCE_CLOCK_AUDIO_FILTER,
+        "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "pipe:1",
+    ]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError as exc:
