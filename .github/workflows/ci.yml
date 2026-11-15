@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+# Avoid running obsolete builds as new commits are pushed to an open PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.13']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install FFmpeg (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or
+              -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+          }
+      - name: Check FFmpeg, FFprobe and caption filter
+        shell: pwsh
+        run: |
+          ffmpeg -version
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed' }
+          ffprobe -version
+          if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed' }
+          $filters = ffmpeg -hide_banner -filters 2>&1 | Out-String
+          if ($filters -notmatch '\ssubtitles\s+V->V') {
+            throw 'FFmpeg must provide the subtitles filter (libass)'
+          }
+      - name: Install application and test dependencies (no ASR model download)
+        run: python -m pip install -e ".[dev]"
+      - name: Verify package, dependencies and syntax
+        run: |
+          python -m pip check
+          python -m compileall -q chomp tests
+          chomp --help
+      - name: Run offline unit and FFmpeg integration tests
+        run: python -m pytest -q -ra
