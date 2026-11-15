@@ -74,9 +74,29 @@ except ImportError:
     pass
 
 
-def check_backend_available() -> bool:
-    """Return True if at least one diarization backend can be used."""
-    return _SHERPA_AVAILABLE or (_RESEMBLYZER_AVAILABLE and _SKLEARN_AVAILABLE)
+def check_backend_available(config: DiarizationConfig | None = None) -> bool:
+    """Return True if at least one diarization backend can be used.
+
+    If a config is provided:
+    - For 'sherpa', returns True only if sherpa-onnx is installed AND valid model paths are configured.
+    - For 'resemblyzer', returns True if resemblyzer + sklearn are installed.
+    - For 'auto', returns True if either backend is fully ready to run.
+    """
+    sherpa_pkg = _SHERPA_AVAILABLE or sherpa_onnx is not None
+    resemblyzer_ready = (_RESEMBLYZER_AVAILABLE or VoiceEncoder is not None) and (
+        _SKLEARN_AVAILABLE or SpectralClustering is not None
+    )
+
+    if config is not None:
+        sherpa_ready = sherpa_pkg and _has_valid_sherpa_models(config)
+        if config.backend == "sherpa":
+            return sherpa_ready
+        elif config.backend == "resemblyzer":
+            return resemblyzer_ready
+        else:  # auto
+            return sherpa_ready or resemblyzer_ready
+
+    return sherpa_pkg or resemblyzer_ready
 
 
 def _get_backend_unavailable_reason() -> str | None:
@@ -116,6 +136,8 @@ class DiarizationConfig:
         max_speakers: Upper bound for auto-detection.
         sample_rate: Expected input sample rate (16000 Hz standard).
         backend: Which backend to prefer: "auto", "sherpa", "resemblyzer".
+        segmentation_model: Path to sherpa-onnx segmentation ONNX model.
+        embedding_model: Path to sherpa-onnx speaker embedding ONNX model.
     """
     num_speakers: int | None = None
     min_segment_ms: int = 500
@@ -126,6 +148,8 @@ class DiarizationConfig:
     max_speakers: int = 6
     sample_rate: int = 16000
     backend: str = "auto"
+    segmentation_model: Path | str | None = None
+    embedding_model: Path | str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +333,52 @@ def _energy_vad(
 # sherpa-onnx backend
 # ---------------------------------------------------------------------------
 
+def _has_valid_sherpa_models(config: DiarizationConfig) -> bool:
+    """Return True if both segmentation and embedding models are configured and exist."""
+    if not config.segmentation_model or not config.embedding_model:
+        return False
+    seg = Path(config.segmentation_model)
+    emb = Path(config.embedding_model)
+    return seg.is_file() and emb.is_file()
+
+
+def _validate_sherpa_models(config: DiarizationConfig) -> tuple[Path, Path]:
+    """Validate that required sherpa-onnx model paths are configured and exist.
+
+    Raises:
+        ValueError: If segmentation_model or embedding_model is not configured.
+        FileNotFoundError: If configured model paths do not exist on disk.
+    """
+    missing_configs: list[str] = []
+    if not config.segmentation_model or str(config.segmentation_model).strip() == "":
+        missing_configs.append("segmentation_model")
+    if not config.embedding_model or str(config.embedding_model).strip() == "":
+        missing_configs.append("embedding_model")
+
+    if missing_configs:
+        raise ValueError(
+            "sherpa-onnx backend requires model paths to be configured. "
+            f"Missing configuration: {', '.join(missing_configs)}. "
+            "Please provide --segmentation-model and --embedding-model."
+        )
+
+    seg_path = Path(config.segmentation_model)
+    emb_path = Path(config.embedding_model)
+    missing_files: list[str] = []
+
+    if not seg_path.exists() or seg_path.is_dir():
+        missing_files.append(f"segmentation model file not found: {seg_path}")
+    if not emb_path.exists() or emb_path.is_dir():
+        missing_files.append(f"embedding model file not found: {emb_path}")
+
+    if missing_files:
+        raise FileNotFoundError(
+            "sherpa-onnx model file(s) missing: " + "; ".join(missing_files)
+        )
+
+    return seg_path, emb_path
+
+
 def _diarize_sherpa(
     audio_path: Path,
     duration_ms: int,
@@ -330,18 +400,20 @@ def _diarize_sherpa(
             "Install with: pip install sherpa-onnx"
         )
 
+    seg_path, emb_path = _validate_sherpa_models(config)
+
     warnings: list[str] = []
 
     # Build sherpa config
     sd_config = sherpa.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa.OfflineSpeakerSegmentationPyannoteModelConfig(
-                model="",
+                model=str(seg_path),
             ),
             num_threads=2,
         ),
         embedding=sherpa.SpeakerEmbeddingExtractorConfig(
-            model="",
+            model=str(emb_path),
             num_threads=2,
         ),
         clustering=sherpa.FastClusteringConfig(
@@ -357,7 +429,7 @@ def _diarize_sherpa(
     except Exception as exc:
         raise RuntimeError(
             f"sherpa-onnx diarization initialization failed: {exc}. "
-            f"Ensure sherpa-onnx models are available."
+            f"Ensure sherpa-onnx models are valid."
         ) from exc
 
     # Resample audio if sherpa expects different sample rate
@@ -391,6 +463,8 @@ def _diarize_sherpa(
         warnings=warnings,
         metadata={
             "backend": "sherpa-onnx",
+            "segmentation_model": str(seg_path),
+            "embedding_model": str(emb_path),
             "raw_segments": len(segments),
         },
     )
@@ -696,10 +770,24 @@ def diarize_audio(
 
     # Select backend
     if backend == "auto":
-        if _SHERPA_AVAILABLE or sherpa_onnx is not None:
+        sherpa_installed = _SHERPA_AVAILABLE or sherpa_onnx is not None
+        sherpa_ready = sherpa_installed and _has_valid_sherpa_models(config)
+        resemblyzer_ready = (_RESEMBLYZER_AVAILABLE or VoiceEncoder is not None) and (
+            _SKLEARN_AVAILABLE or SpectralClustering is not None
+        )
+
+        if sherpa_ready:
             backend = "sherpa"
-        elif (_RESEMBLYZER_AVAILABLE or VoiceEncoder is not None) and (_SKLEARN_AVAILABLE or SpectralClustering is not None):
+        elif resemblyzer_ready:
             backend = "resemblyzer"
+        elif sherpa_installed:
+            raise RuntimeError(
+                "No usable diarization backend: sherpa-onnx is installed, but required "
+                "model files were not configured or do not exist on disk. "
+                "Please configure segmentation_model and embedding_model paths "
+                "(or --segmentation-model and --embedding-model in the CLI), "
+                "or install the resemblyzer fallback: pip install 'chomp-chomp[diarize]'"
+            )
         else:
             raise RuntimeError(
                 f"Diarization backend unavailable: {BACKEND_UNAVAILABLE_REASON}"
