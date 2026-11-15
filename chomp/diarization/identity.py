@@ -81,12 +81,26 @@ class SpeakerIdentityMap:
         )
 
     def save(self, path: Path) -> None:
-        """Write the identity map to a JSON file."""
+        """Write the identity map to a JSON file using exclusive creation.
+
+        Fails closed with FileExistsError if the target file already exists,
+        preventing accidental overwrite of human review or race conditions.
+
+        Raises:
+            FileExistsError: If the target file already exists.
+        """
+        path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.to_json_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        content = json.dumps(self.to_json_dict(), indent=2, ensure_ascii=False)
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(content)
+        except FileExistsError as exc:
+            raise FileExistsError(
+                f"Speaker identity map already exists at '{path}'. "
+                "Cannot overwrite existing identity mappings. "
+                "Please choose a different output directory."
+            ) from exc
 
     @classmethod
     def load(cls, path: Path) -> SpeakerIdentityMap:
