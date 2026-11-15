@@ -257,3 +257,108 @@ class TestDiarizationExportSafety:
         assert "already exists" in str(exc_info.value).lower()
         # Verify existing content unchanged
         assert target_path.read_text(encoding="utf-8") == "existing content"
+
+    def test_existing_turns_with_no_identity_map_rejected(
+        self, tmp_path: Path, dummy_media: Path, mock_diarization_result: DiarizationResult
+    ):
+        """Preflight rejects export when speaker_turns.json exists without identity map."""
+        out_dir = tmp_path / "turns_only_dir"
+        out_dir.mkdir(parents=True)
+        turns_path = out_dir / "speaker_turns.json"
+        identity_path = out_dir / "speaker_identity_map.json"
+
+        original_turns_content = b'{\n  "turns": [\n    {"speaker_id": "PRESERVED_TURN"}\n  ]\n}'
+        turns_path.write_bytes(original_turns_content)
+
+        assert not identity_path.exists()
+
+        with patch("chomp.diarization.integration.check_backend_available", return_value=True), \
+             patch("chomp.diarization.integration.convert_to_wav") as mock_convert, \
+             patch("chomp.diarization.integration.diarize_audio", return_value=mock_diarization_result) as mock_diarize:
+            with pytest.raises(FileExistsError) as exc_info:
+                diarize_and_export(dummy_media, out_dir, duration_ms=5000)
+
+        # Preflight reject: no expensive FFmpeg conversion or inference
+        assert not mock_convert.called
+        assert not mock_diarize.called
+
+        # Existing turns file remains byte-for-byte identical
+        assert turns_path.read_bytes() == original_turns_content
+        # Identity file is not created
+        assert not identity_path.exists()
+
+        # Actionable error message naming the conflicting turns file
+        err = str(exc_info.value)
+        assert str(turns_path) in err
+        assert "already exists" in err.lower()
+        assert "different output directory" in err.lower()
+
+    def test_existing_turns_and_existing_identity_map_rejected(
+        self, tmp_path: Path, dummy_media: Path, mock_diarization_result: DiarizationResult
+    ):
+        """Preflight rejects export when both turns and identity files already exist."""
+        out_dir = tmp_path / "both_exist_dir"
+        out_dir.mkdir(parents=True)
+        turns_path = out_dir / "speaker_turns.json"
+        identity_path = out_dir / "speaker_identity_map.json"
+
+        original_turns = b'{"turns": "original_turns_content"}'
+        original_identity = b'{"mappings": "original_identity_content"}'
+        turns_path.write_bytes(original_turns)
+        identity_path.write_bytes(original_identity)
+
+        with patch("chomp.diarization.integration.check_backend_available", return_value=True), \
+             patch("chomp.diarization.integration.convert_to_wav") as mock_convert, \
+             patch("chomp.diarization.integration.diarize_audio", return_value=mock_diarization_result) as mock_diarize:
+            with pytest.raises(FileExistsError) as exc_info:
+                diarize_and_export(dummy_media, out_dir, duration_ms=5000)
+
+        # Preflight reject: no conversion or inference
+        assert not mock_convert.called
+        assert not mock_diarize.called
+
+        # Both files remain byte-for-byte identical
+        assert turns_path.read_bytes() == original_turns
+        assert identity_path.read_bytes() == original_identity
+
+        # Actionable error message naming the conflicts
+        err = str(exc_info.value)
+        assert str(turns_path) in err
+        assert str(identity_path) in err
+        assert "already exists" in err.lower()
+        assert "different output directory" in err.lower()
+
+    def test_turns_file_created_between_preflight_and_turns_write_cannot_be_overwritten(
+        self, tmp_path: Path, dummy_media: Path, mock_diarization_result: DiarizationResult
+    ):
+        """A turns file created between preflight and exclusive turns write is not overwritten."""
+        out_dir = tmp_path / "late_race_dir"
+        out_dir.mkdir(parents=True)
+        turns_path = out_dir / "speaker_turns.json"
+        identity_path = out_dir / "speaker_identity_map.json"
+
+        concurrent_content = b'{"turns": "concurrent_race_winner_content"}'
+
+        def simulate_late_arrival(*args, **kwargs):
+            # Simulate a concurrent process creating speaker_turns.json during diarization
+            turns_path.write_bytes(concurrent_content)
+            return mock_diarization_result
+
+        with patch("chomp.diarization.integration.check_backend_available", return_value=True), \
+             patch("chomp.diarization.integration.convert_to_wav"), \
+             patch("chomp.diarization.integration.diarize_audio", side_effect=simulate_late_arrival):
+            with pytest.raises(FileExistsError) as exc_info:
+                diarize_and_export(dummy_media, out_dir, duration_ms=5000)
+
+        # The existing turns file was NOT overwritten
+        assert turns_path.read_bytes() == concurrent_content
+
+        # The identity map template was already written before turns write failed
+        # (documenting the non-atomic export limitation)
+        assert identity_path.is_file()
+
+        # Actionable error message naming the conflicting turns file
+        err = str(exc_info.value)
+        assert str(turns_path) in err
+        assert "already exists" in err.lower()
+        assert "different output directory" in err.lower()
