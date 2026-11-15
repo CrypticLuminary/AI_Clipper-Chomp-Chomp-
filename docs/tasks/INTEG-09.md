@@ -71,13 +71,22 @@ The decoded audio envelope correlation with the corresponding source interval ro
 
 ## Final local verification
 
-After framing and legacy-queue support, `python -m pytest -q -ra` passed **227 tests with no skips** on Windows/Python 3.13.14. `python -m compileall -q chomp tests` and `python -m pip check` passed. Both dependency sets were installed and checked using local wheels. The console and module help commands passed, including the simulated no-NumPy and no-model dependency case. `python -m chomp.evaluation.demo` generated its labeled synthetic fixture. Local VOD technical verification complete. Human content evaluation and real diarization model accuracy remain open.
+After framing and legacy-queue support, `python -m pytest -q -ra` passed **227 tests with no skips** on Windows/Python 3.13.14. `python -m compileall -q chomp tests` and `python -m pip check` passed. A separate base-only editable install passed `pip check`, the console and module help commands, and produced the expected diagnostic when diarization was requested without optional dependencies. `python -m chomp.evaluation.demo` generated its labeled synthetic fixture. Local VOD technical verification complete. Human content evaluation and real diarization model accuracy remain open.
+
+## GitHub Actions and handoff
+
+The implementation commit `a01674b699454f7a7eb1653c1a7929b43d8b2f1d` passed every job in [CI run 43669705895](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43669705895). The evidence update is documentation only. [Draft PR #8](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/pull/8) targets `feat/vod-foundation`; its checks show the status for the current head.
+
+| Runner | Python 3.11 | Python 3.13 |
+| --- | --- | --- |
+| Windows | [Passed](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43669705895/job/132676805739) | [Passed](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43669705895/job/132676805917) |
+| Ubuntu | [Passed](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43669705895/job/132676805877) | [Passed](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43669705895/job/132676805889) |
 
 ## Known limitations
 
 - Diarization keeps the fixed `diarization_input.wav` scratch filename. Two simultaneous exports to the same destination can still interfere during conversion or analysis. The JSON writes remain exclusive, and a late turns conflict may leave an unconfirmed identity template. Multi-file export is not transactional.
 - Sherpa and Resemblyzer inference accuracy was not tested. A confirmed streamer ID still requires explicit operator input. For multi-track VODs, supply an aligned transcript from the intended audio track. The internal faster-whisper path still chooses its default audio track.
 - CaptionCraft estimates timing from transcript segments and may shorten dense speech. Cutline uses context heuristics and requires the reviewer to judge setup and payoff. Ranking remains heuristic. ClipLedger's reviewed denominators cannot establish discovery recall or virality.
-- Automatic facecam uses a fixed crop and sample-based evidence. It can miss fast or ambiguous changes, and a preferred streamer may be absent from the sample. A supplied ROI or `fit` provides a reviewable alternative. No identity or generalization claims follow from one VOD.
+- Automatic facecam uses a fixed crop and sample-based evidence. It can miss fast or ambiguous changes, and a padded region may include embedded overlays bordering the webcam. The test split included a small strip of source chat. A supplied ROI or `fit` provides a reviewable alternative. No identity or generalization claims follow from one VOD.
 - ClipLedger compares matching asserted source identifiers and durations within one second. Its time-window pairs are potential same-event matches and need independent review for changed media or clocks.
 - `main`, `feat/vod-foundation`, the source branches, and their PRs are outside the write scope. No remote acquisition, posting, database addition or new model-provider API is required.
