@@ -26,8 +26,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-score", type=float, default=45)
     p.add_argument("--max-clips", type=int, default=3)
     p.add_argument("--facecam-roi", help="source pixel rectangle x,y,w,h for confirmed streamer webcam")
+    p.add_argument("--facecam-model", type=Path, help="optional local YuNet ONNX file for --layout auto-facecam")
     p.add_argument("--gameplay-roi", help="optional source pixel rectangle x,y,w,h for gameplay area")
-    p.add_argument("--layout", choices=["auto", "facecam-gameplay", "gameplay-only", "letterbox"], default="auto", help="two primary styles: facecam-gameplay or gameplay-only; auto uses split only with facecam ROI")
+    p.add_argument(
+        "--layout", choices=["auto", "auto-facecam", "facecam-gameplay", "gameplay-only", "fit", "letterbox"],
+        default="auto", help="auto-facecam detects stable facecams, with a full-frame fit fallback",
+    )
     p.add_argument("--audio-stream", type=int, default=0, help="0-based audio track index (defaults to first audio stream)")
     p.add_argument("--start", type=float, help="manual preview start in source seconds; requires --end and --render")
     p.add_argument("--end", type=float, help="manual preview end in source seconds; requires --start and --render")
@@ -35,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if not args.acknowledge_permission:
         p.error("--acknowledge-permission required; a URL/file alone does not grant reuse rights")
+    if args.facecam_model is not None and args.layout != "auto-facecam":
+        p.error("--facecam-model requires --layout auto-facecam")
     if len(args.input)>1 and (args.chat or args.transcript or args.speaker_turns or args.main_speaker_id):
         p.error("--chat / --transcript / speaker options currently apply to one input at a time")
     def parse_roi(value: str | None, name: str) -> tuple[int, int, int, int] | None:
@@ -63,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 start_s=args.start, end_s=args.end,
                 transcript_path=Path(args.transcript) if args.transcript else None,
                 facecam_roi=roi, gameplay_roi=gameplay, layout=args.layout,
-                audio_stream=args.audio_stream,
+                audio_stream=args.audio_stream, facecam_model=args.facecam_model,
             )
         except Exception as exc:
             print(json.dumps({"source":args.input[0], "error":str(exc)}))
@@ -73,7 +79,16 @@ def main(argv: list[str] | None = None) -> int:
     success = 0
     for src in args.input:
         try:
-            result = process(Path(src),Path(args.output),rights_ref=args.rights_ref, transcript_path=Path(args.transcript) if args.transcript else None,chat_path=Path(args.chat) if args.chat else None,chat_offset_ms=args.chat_offset_ms,speaker_turns_path=Path(args.speaker_turns) if args.speaker_turns else None,main_speaker_id=args.main_speaker_id,transcribe=args.transcribe,asr_model=args.asr_model,asr_device=args.asr_device,min_score=args.min_score,limit=args.max_clips,render=args.render,facecam_roi=roi,gameplay_roi=gameplay,layout=args.layout,audio_stream=args.audio_stream)
+            result = process(
+                Path(src), Path(args.output), rights_ref=args.rights_ref,
+                transcript_path=Path(args.transcript) if args.transcript else None,
+                chat_path=Path(args.chat) if args.chat else None, chat_offset_ms=args.chat_offset_ms,
+                speaker_turns_path=Path(args.speaker_turns) if args.speaker_turns else None,
+                main_speaker_id=args.main_speaker_id, transcribe=args.transcribe, asr_model=args.asr_model,
+                asr_device=args.asr_device, min_score=args.min_score, limit=args.max_clips, render=args.render,
+                facecam_roi=roi, gameplay_roi=gameplay, layout=args.layout, audio_stream=args.audio_stream,
+                facecam_model=args.facecam_model,
+            )
         except Exception as exc:
             print(json.dumps({"source":src,"error":str(exc)}))
             continue

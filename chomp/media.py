@@ -96,8 +96,8 @@ def exported_audio_level(path: Path) -> float:
 
 def resolve_layout(layout: str, facecam_roi: tuple[int, int, int, int] | None) -> str:
     """Select one of the two primary clip formats without pretending to detect a facecam."""
-    if layout not in {"auto", "facecam-gameplay", "gameplay-only", "letterbox"}:
-        raise ValueError("Unknown layout. Use auto, facecam-gameplay, gameplay-only, or letterbox")
+    if layout not in {"auto", "facecam-gameplay", "gameplay-only", "fit", "letterbox"}:
+        raise ValueError("Unknown layout. Use auto, facecam-gameplay, gameplay-only, fit, or letterbox")
     choice = ("facecam-gameplay" if facecam_roi else "gameplay-only") if layout == "auto" else layout
     if choice == "facecam-gameplay" and facecam_roi is None:
         raise ValueError("facecam-gameplay requires --facecam-roi x,y,w,h; automatic facecam detection is not implemented")
@@ -121,12 +121,13 @@ def render_preview(
     captions_path: Path | None = None,
     facecam_roi: tuple[int, int, int, int] | None = None,
     gameplay_roi: tuple[int, int, int, int] | None = None,
-    layout: str = "auto", audio_stream: int = 0,
+    layout: str = "auto", audio_stream: int = 0, fit_facecam: bool = False,
 ) -> None:
     """Render exact selected range into one of two primary vertical layouts.
 
     facecam-gameplay: upper 35% confirmed facecam ROI, lower 65% gameplay.
     gameplay-only: fill portrait with centered gameplay crop (not a letterbox strip).
+    fit: fit the full recording against a blurred background.
     letterbox: legacy diagnostic mode, preserving full landscape video.
 
     There is no automatic facecam detector or intelligent action tracking yet.
@@ -168,15 +169,29 @@ def render_preview(
         x, y, w, h = facecam_roi
         top = round(height * .35 / 2) * 2
         bottom = height - top
+        if fit_facecam:
+            camera = (f"scale={width}:{top}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                      f"pad={width}:{top}:(ow-iw)/2:(oh-ih)/2")
+        else:
+            camera = f"scale={width}:{top}:force_original_aspect_ratio=increase,crop={width}:{top}"
         vf = (f"[0:v]split=2[cam][game];"
-              f"[cam]crop={w}:{h}:{x}:{y},scale={width}:{top}:force_original_aspect_ratio=increase,"
-              f"crop={width}:{top},setsar=1[camout];"
+              f"[cam]crop={w}:{h}:{x}:{y},{camera},setsar=1[camout];"
               f"[game]{crop_filter(gameplay_roi)}scale={width}:{bottom}:force_original_aspect_ratio=increase,"
               f"crop={width}:{bottom},setsar=1[gameout];"
               f"[camout][gameout]vstack=inputs=2,format=yuv420p[stage]")
     elif chosen_layout == "gameplay-only":
         vf = (f"[0:v]{crop_filter(gameplay_roi)}scale={width}:{height}:force_original_aspect_ratio=increase,"
               f"crop={width}:{height},setsar=1,format=yuv420p[stage]")
+    elif chosen_layout == "fit":
+        # Blur at lower resolution before filling the portrait canvas.
+        blur_w, blur_h = max(2, width // 6 * 2), max(2, height // 6 * 2)
+        vf = (
+            f"[0:v]{crop_filter(gameplay_roi)}split=2[foreground][background];"
+            f"[foreground]scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fit];"
+            f"[background]scale={blur_w}:{blur_h}:force_original_aspect_ratio=increase,"
+            f"crop={blur_w}:{blur_h},gblur=sigma=10,scale={width}:{height},setsar=1[blur];"
+            "[blur][fit]overlay=(W-w)/2:(H-h)/2,format=yuv420p[stage]"
+        )
     else:  # explicit legacy letterbox, for diagnostics/comparison
         vf = (f"[0:v]{crop_filter(gameplay_roi)}scale={width}:{height}:force_original_aspect_ratio=decrease,"
               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[stage]")
