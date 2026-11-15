@@ -190,6 +190,26 @@ def test_diarization_round_trip_uses_source_clock_with_delayed_audio(tmp_path, m
 
 
 @needs_ffmpeg
+def test_audio_only_boundaries_use_the_selected_audio_track(tmp_path):
+    source = tmp_path / "two audio tracks.mp4"
+    ffmpeg(
+        "-f", "lavfi", "-i", "color=black:size=320x180:rate=12:duration=28",
+        "-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=48000:duration=28",
+        "-f", "lavfi", "-i", "aevalsrc='0.3*sin(2*PI*440*t)*between(t,10,12)':s=48000:d=28",
+        "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0", "-c:v", "libx264",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+    )
+    out = tmp_path / "review"
+    silent = process(source, out, rights_ref="fixture", audio_stream=0, min_score=0)
+    active = process(source, out, rights_ref="fixture", audio_stream=1, min_score=0)
+    assert silent["clips"] == []
+    [clip] = active["clips"]
+    assert clip["boundary"]["method"] == "signal_padding_audio_silence"
+    assert 10000 <= clip["candidate"]["anchor_ms"] <= 12500
+    assert clip["captions_srt"] is None and clip["caption_cues"] == 0
+
+
+@needs_ffmpeg
 def test_review_denominators_and_source_clock_comparison(tmp_path):
     source = vod(tmp_path / "four moments.mp4", duration=120)
     speech = ("Did you see the setup for this turn? Can you see how the result follows from it? "
@@ -233,6 +253,27 @@ def test_review_denominators_and_source_clock_comparison(tmp_path):
     with pytest.raises(ClipLedgerError, match="clocks may not align"):
         compare(manifest, labels, mismatched, labels)
     assert labels_path.read_bytes() == label_bytes
+
+
+@pytest.mark.parametrize("version", ["0.2", "0.3"])
+def test_legacy_queue_can_be_compared_without_migrating_it(tmp_path, version):
+    shared = {
+        "source": "same authorized source.mp4", "duration_ms": 60_000,
+        "candidate_count": 1, "selected_for_review": 1,
+        "clips": [{"candidate": {"start_ms": 5000, "end_ms": 19000, "anchor_ms": 9000}, "preview": None}],
+    }
+    old_path = write_json(tmp_path / "old queue.json", {**shared, "schema_version": version, "job_id": "old"})
+    old_bytes = old_path.read_bytes()
+    new_path = write_json(tmp_path / "new queue.json", {**shared, "schema_version": "0.4", "job_id": "new"})
+    old, new = read_manifest(old_path), read_manifest(new_path)
+    old_review, new_review = tmp_path / "older review.json", tmp_path / "newer review.json"
+    make_template(old, old_review)
+    make_template(new, new_review)
+    comparison = compare(old, read_annotations(old, old_review), new, read_annotations(new, new_review))
+    assert len(comparison["matched"]) == 1
+    assert comparison["matched"][0]["old_decision"] is None
+    assert comparison["matched"][0]["anchor_distance_ms"] == 0
+    assert old_path.read_bytes() == old_bytes
 
 
 @needs_ffmpeg

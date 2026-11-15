@@ -90,11 +90,11 @@ def _load_json(path: Path) -> Any:
 
 
 def read_manifest(path: str | Path) -> Manifest:
-    """Read the *actual* pipeline v0.4 review_queue.json contract."""
+    """Read the shared source-clock fields from v0.2 through v0.4 review queues."""
     path = Path(path)
     data = _object(_load_json(path), "review manifest")
-    if data.get("schema_version") != "0.4":
-        raise ClipLedgerError("Unsupported review_queue schema_version (expected '0.4')")
+    if data.get("schema_version") not in ("0.2", "0.3", "0.4"):
+        raise ClipLedgerError("Unsupported review_queue schema_version (expected '0.2', '0.3' or '0.4')")
     job_id = _required_string(data.get("job_id"), "job_id")
     source = _required_string(data.get("source"), "source")
     duration = _integer(data.get("duration_ms"), "duration_ms", 1)
