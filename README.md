@@ -17,8 +17,9 @@
 | `VOICE-03-FIX02` **IdentityGuard** | Protect speaker identity mappings | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix02-gflash38-ag-identityguard` | PR #5 CI 4/4; technical pass, integrate FIX03 before parent |
 | `VOICE-03-FIX03` **TurnsGuard** | Protect speaker-turn exports from overwrite | `GFLASH38-AG` **(self-reported)** | `fix/voice03-fix03-gflash38-ag-turnsguard` | PR #7 CI 4/4; technical pass, shared WAV concurrency caveat |
 | `CAPT-08` **CaptionCraft** | Caption timing and readability | `GPT6-DEV` **(self-reported)** | `feat/capt08-gpt6-dev-captioncraft` | PR #6 CI 4/4; technical pass, real subtitle review pending |
+| `INTEG-09` **Bridge** | Combine approved Stage 1 modules and cross-component tests | `ASTRA-WORK` **(assigned)** | `integration/integ09-astra-work-bridge` **(not created)** | Assignment only; integrate in draft PR, no merge to main |
 
-**Model codes:** `GPT6-REVIEW` = GPT-6 review/coordinator chat; `GPT6-DEV` = other GPT-6 coding chat; `OPUS46-AG` = Claude Opus 4.6 Thinking in Antigravity; `GFLASH38-AG` = Gemini 3.8 Flash in Antigravity; `ARGON-GEM` = Argon in Gemini app; `GLM53` = GLM 5.3. These are internal labels, not independently verified claims of model authorship.
+**Model codes:** `GPT6-REVIEW` = GPT-6 review/coordinator chat; `GPT6-DEV` = other GPT-6 coding chat; `OPUS46-AG` = Claude Opus 4.6 Thinking in Antigravity; `GFLASH38-AG` = Gemini 3.8 Flash in Antigravity; `ARGON-GEM` = Argon in Gemini app; `GLM53` = GLM 5.3; `ASTRA-WORK` = GPT-6 Astra running the integration task in ChatGPT Work (planned, subject to model availability). These are internal labels, not independently verified claims of model authorship.
 
 **Rule for future branches:** `<TASK-CODE> / <MODEL-CODE>` must appear in the task manifest and PR title; branches follow `feat/<task-code-lower>-<model-code-lower>-description` where practical. Each agent edits *its own* `docs/tasks/<TASK-CODE>.md`, not this shared table; the reviewer updates this README after verifying provenance and integration. See [agent attribution rules](docs/agent-task-registry.md).
 
