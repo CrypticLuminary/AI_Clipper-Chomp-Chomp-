@@ -47,6 +47,10 @@ def overlap_ratio(a: Candidate, b: Candidate) -> float:
 
 def select(candidates: list[Candidate], max_clips: int=3, min_score: float=45, overlap_threshold: float=.25) -> list[Candidate]:
     """Rank FIRST, suppress overlapping lower-ranked duplicates second, allow zero clips."""
+    if max_clips == 0:
+        return []
+    if not 0 <= min_score <= 100 or any(not 0 <= candidate.score <= 100 for candidate in candidates):
+        raise ValueError("ranking scores and the minimum score must be finite and within 0..100")
     result: list[Candidate] = []
     for c in sorted(candidates, key=lambda x: x.score, reverse=True):
         if c.score < min_score:
