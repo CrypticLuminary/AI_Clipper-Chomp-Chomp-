@@ -252,11 +252,14 @@ def approve(review: Path, destination: Path, *, reviewer: str, clip_index: int,
     if clip.get("publish_status") != "disabled" or not clip.get("rights_ref", "").strip():
         raise ValueError("Clip is missing review or rights metadata")
     hashes = clip.get("artifact_sha256", {})
-    for key in ("preview", "edit_spec", "captions_srt"):
+    extra_artifacts = ("shot_evidence", "render_report")
+    for key in ("preview", "edit_spec", "captions_srt", *extra_artifacts):
         filename = clip.get(key)
         if not filename and key == "captions_srt":
             if hashes.get(key) is not None:
                 raise ValueError("Caption artifact metadata is inconsistent")
+            continue
+        if key in extra_artifacts and not filename and key not in hashes:
             continue
         if not filename or not hashes.get(key):
             raise ValueError(f"Render the clip before approval: missing {key}")

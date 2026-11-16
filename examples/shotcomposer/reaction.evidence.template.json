@@ -1,0 +1,102 @@
+{
+  "schema_version": "chomp-shot-evidence/1",
+  "source": {
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "duration_ms": 12000,
+    "width": 1920,
+    "height": 1080,
+    "rotation": 0,
+    "sar": {
+      "num": 1,
+      "den": 1
+    },
+    "frame_rate": {
+      "num": 30,
+      "den": 1
+    },
+    "video_stream": 0,
+    "audio_stream": 0
+  },
+  "rights_ref": "Synthetic contract example, no media supplied",
+  "regions": [
+    {
+      "id": "camera",
+      "subject_id": "speaker",
+      "role": "streamer_container",
+      "box": [
+        1400,
+        20,
+        500,
+        500
+      ],
+      "start_ms": 0,
+      "end_ms": 12000,
+      "support": "unverified",
+      "visibility": "unknown",
+      "basis": "sample",
+      "reviewer": null,
+      "reference": "Synthetic design example only. Replace with real controller evidence; not a source observation.",
+      "minimum_output_px": 32
+    },
+    {
+      "id": "face",
+      "subject_id": "speaker",
+      "role": "person",
+      "box": [
+        1550,
+        100,
+        150,
+        240
+      ],
+      "start_ms": 0,
+      "end_ms": 12000,
+      "support": "unverified",
+      "visibility": "unknown",
+      "basis": "sample",
+      "reviewer": null,
+      "reference": "Synthetic design example only. Replace with real controller evidence; not a source observation.",
+      "minimum_output_px": 32
+    },
+    {
+      "id": "game",
+      "subject_id": "action",
+      "role": "primary_action",
+      "box": [
+        200,
+        0,
+        1000,
+        1080
+      ],
+      "start_ms": 0,
+      "end_ms": 12000,
+      "support": "unverified",
+      "visibility": "unknown",
+      "basis": "sample",
+      "reviewer": null,
+      "reference": "Synthetic design example only. Replace with real controller evidence; not a source observation.",
+      "minimum_output_px": 32
+    },
+    {
+      "id": "target",
+      "subject_id": "action",
+      "role": "object",
+      "box": [
+        560,
+        450,
+        180,
+        250
+      ],
+      "start_ms": 0,
+      "end_ms": 12000,
+      "support": "unverified",
+      "visibility": "unknown",
+      "basis": "sample",
+      "reviewer": null,
+      "reference": "Synthetic design example only. Replace with real controller evidence; not a source observation.",
+      "minimum_output_px": 32
+    }
+  ],
+  "facts": [],
+  "scene_cuts_ms": [],
+  "tracking": []
+}

@@ -1,0 +1,166 @@
+{
+  "schema_version": "chomp-shot-plan/1",
+  "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "start_ms": 0,
+  "end_ms": 12000,
+  "time_policy": "continuous_source",
+  "canvas": {
+    "width": 540,
+    "height": 960,
+    "fps": {
+      "num": 30,
+      "den": 1
+    },
+    "pixel_format": "yuv420p"
+  },
+  "shots": [
+    {
+      "id": "setup",
+      "start_ms": 0,
+      "end_ms": 4000,
+      "layout": "streamer_gameplay_split",
+      "reason": "Illustrative only: retain cause and reactor together.",
+      "evidence_refs": [
+        "camera",
+        "game"
+      ],
+      "slots": [
+        {
+          "id": "streamer",
+          "region_id": "camera",
+          "rect": [
+            0,
+            0,
+            540,
+            300
+          ],
+          "fit": "cover",
+          "required_region_ids": [
+            "face"
+          ],
+          "crop_path": [],
+          "zoom": [],
+          "easing": "ease_in_out"
+        },
+        {
+          "id": "main",
+          "region_id": "game",
+          "rect": [
+            0,
+            300,
+            540,
+            660
+          ],
+          "fit": "cover",
+          "required_region_ids": [
+            "target"
+          ],
+          "crop_path": [],
+          "zoom": [],
+          "easing": "ease_in_out"
+        }
+      ],
+      "transition": {
+        "kind": "cut",
+        "duration_ms": 0
+      },
+      "graphics": []
+    },
+    {
+      "id": "reaction",
+      "start_ms": 4000,
+      "end_ms": 6000,
+      "layout": "streamer_full",
+      "reason": "Illustrative only: show a Director-selected response.",
+      "evidence_refs": [
+        "camera"
+      ],
+      "slots": [
+        {
+          "id": "reaction",
+          "region_id": "camera",
+          "rect": [
+            0,
+            0,
+            540,
+            960
+          ],
+          "fit": "cover",
+          "required_region_ids": [
+            "face"
+          ],
+          "crop_path": [],
+          "zoom": [],
+          "easing": "ease_in_out"
+        }
+      ],
+      "transition": {
+        "kind": "cut",
+        "duration_ms": 0
+      },
+      "graphics": []
+    },
+    {
+      "id": "return",
+      "start_ms": 6000,
+      "end_ms": 12000,
+      "layout": "streamer_gameplay_split",
+      "reason": "Illustrative only: restore context for the outcome.",
+      "evidence_refs": [
+        "camera",
+        "game"
+      ],
+      "slots": [
+        {
+          "id": "streamer",
+          "region_id": "camera",
+          "rect": [
+            0,
+            0,
+            540,
+            300
+          ],
+          "fit": "cover",
+          "required_region_ids": [
+            "face"
+          ],
+          "crop_path": [],
+          "zoom": [],
+          "easing": "ease_in_out"
+        },
+        {
+          "id": "main",
+          "region_id": "game",
+          "rect": [
+            0,
+            300,
+            540,
+            660
+          ],
+          "fit": "cover",
+          "required_region_ids": [
+            "target"
+          ],
+          "crop_path": [],
+          "zoom": [],
+          "easing": "ease_in_out"
+        }
+      ],
+      "transition": {
+        "kind": "cut",
+        "duration_ms": 0
+      },
+      "graphics": []
+    }
+  ],
+  "caption_exclusions": [],
+  "capability_requests": [],
+  "provenance": {
+    "provider": "synthetic-example",
+    "model": "none",
+    "revision": 1,
+    "parent_sha256": null,
+    "editorial_plan_sha256": null
+  }
+}

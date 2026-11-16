@@ -332,8 +332,14 @@ def render_preview(
     preserve_gameplay: bool = False, segments: tuple[LayoutSegment, ...] = (),
     caption_position: str = "lower", audio_profile: str = "original", shorts: bool = False,
     hook: str | None = None, sound_cues: tuple[SoundCue, ...] = (),
-) -> None:
-    """Render static or temporal composition while keeping one continuous audio timeline."""
+    shot_plan: dict | None = None, shot_evidence: dict | None = None,
+) -> dict | None:
+    """Render one continuous audio program and return technical evidence for ShotPlans."""
+    def file_version(path: Path) -> tuple[int, ...]:
+        info = path.stat()
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    source_version = file_version(source) if shot_plan is not None else None
     meta = probe(source)
     checked_span(start_ms, end_ms, meta["duration_ms"])
     video = next((stream for stream in meta["streams"] if stream.get("codec_type") == "video"), None)
@@ -357,6 +363,24 @@ def render_preview(
         sar = Fraction(1)
     if rotation % 180 == 90:
         sar = 1 / sar
+    compiled_shots = None
+    if shot_plan is not None:
+        from .shotcomposer.compiler import compile_plan
+        from .shotcomposer.workflow import verify_source
+
+        if shot_evidence is None:
+            raise ValueError("A Director shot plan requires its independent evidence ledger")
+        if segments or facecam_roi or gameplay_roi or hook or sound_cues or audio_profile != "original":
+            raise ValueError("ShotComposer owns visual composition and preserves original audio; remove conflicting overrides")
+        if (shot_plan["start_ms"], shot_plan["end_ms"], shot_plan["canvas"]["width"], shot_plan["canvas"]["height"],
+                shot_evidence["source"]["audio_stream"]) != (start_ms, end_ms, width, height, audio_stream):
+            raise ValueError("Render arguments disagree with the Director shot plan")
+        verify_source(source, shot_evidence, meta=meta)
+        if file_version(source) != source_version:
+            raise ValueError("Source changed while preparing the ShotPlan")
+        compiled_shots = compile_plan(shot_plan, shot_evidence)
+    elif shot_evidence is not None:
+        raise ValueError("Shot evidence requires a shot plan")
     if not segments:
         segments = (LayoutSegment(start_ms, end_ms, resolve_layout(layout, facecam_roi), facecam_roi,
                                   gameplay_roi, fit_facecam, preserve_gameplay),)
@@ -400,7 +424,9 @@ def render_preview(
 
     # Normalize non-square pixels after cropping, so source-coordinate ROIs work.
     # For temporal cuts the frame grid is shared by every branch. Audio is never concatenated.
-    if len(segments) == 1:
+    if compiled_shots is not None:
+        graph = compiled_shots.graph
+    elif len(segments) == 1:
         graph = _composite("[0:v:0]", "[stage]", segments[0], width, height, "a", sar)
     else:
         try:
@@ -481,8 +507,11 @@ def render_preview(
             graph_args = ["-filter_complex_script", "video-filters.txt"]
         encoding = (["-b:v", "12M", "-maxrate", "18M", "-bufsize", "24M"]
                     if shorts and width >= 1080 else ["-crf", "20" if width >= 1080 else "23"])
+        # ShotComposer already bounds video by frame count and audio by sample
+        # duration. Muxer -t rounding can discard its last legal video frame.
+        time_limit = ["-t", duration] if compiled_shots is None else []
         args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error", "-xerror",
-                "-ss", _seconds(start_ms), "-i", str(source), *audio_inputs, "-t", duration,
+                "-ss", _seconds(start_ms), "-i", str(source), *audio_inputs, *time_limit,
                 "-filter_complex_threads", "1", *graph_args,
                 "-map", "[out]", *audio_map,
                 "-c:v", "libx264", "-preset", "veryfast", *encoding,
@@ -498,13 +527,36 @@ def render_preview(
         if not any(s.get("codec_type") == "audio" and s.get("codec_name") == "aac" for s in rendered["streams"]):
             raise RuntimeError("Rendered clip is missing AAC audio")
         expected = end_ms - start_ms
-        if abs(rendered["duration_ms"] - expected) > 150:
+        duration_tolerance = 150
+        shot_report = None
+        if compiled_shots is not None:
+            from .shotcomposer.contract import fraction
+
+            rate = fraction(shot_plan["canvas"]["fps"])
+            duration_tolerance = max(25, math.ceil(1000 / rate))
+            expected_frames = compiled_shots.report["requested_vs_realized_timing"][-1]["end_frame_exclusive"]
+            if outvideo.get("nb_frames") not in (None, "N/A", str(expected_frames), expected_frames):
+                raise RuntimeError(f"Rendered {outvideo['nb_frames']} frames; ShotPlan needs {expected_frames}")
+            if outvideo.get("pix_fmt") != "yuv420p" or outvideo.get("sample_aspect_ratio") != "1:1":
+                raise RuntimeError("Rendered video did not preserve the ShotPlan pixel format and aspect ratio")
+            shot_report = {**compiled_shots.report, "output_media": {
+                "duration_ms": rendered["duration_ms"], "target_frame_count": expected_frames,
+                "video": {k: outvideo.get(k) for k in ("codec_name", "width", "height", "pix_fmt",
+                                                        "sample_aspect_ratio", "avg_frame_rate",
+                                                        "time_base", "nb_frames", "duration")},
+                "audio": [{k: s.get(k) for k in ("codec_name", "sample_rate", "channels", "start_time", "duration")}
+                          for s in rendered["streams"] if s.get("codec_type") == "audio"],
+            }}
+        if abs(rendered["duration_ms"] - expected) > duration_tolerance:
             raise RuntimeError("Rendered clip has unexpected duration; verify source timestamps")
         if outvideo.get("duration") not in (None, "N/A"):
-            if abs(float(outvideo["duration"]) * 1000 - expected) > 150:
+            if abs(float(outvideo["duration"]) * 1000 - expected) > duration_tolerance:
                 raise RuntimeError("Rendered video ended early or ran past the clip")
         exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-xerror",
                       "-i", str(staged), "-f", "null", "-"], timeout=timeout)
         if any(digest_file(Path(path)) != digest for path, digest in {(cue.path, cue.sha256) for cue in active_cues}):
             raise ValueError("A sound cue asset changed during rendering")
+        if compiled_shots is not None and file_version(source) != source_version:
+            raise ValueError("Source changed during ShotPlan rendering")
         staged.replace(output)
+    return shot_report
