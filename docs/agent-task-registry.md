@@ -23,6 +23,8 @@ Several coding agents work in parallel. A GitHub commit identifies the GitHub ac
 
 ## Copyable task manifest
 
+Editing tasks use the [editing regression index](editing/regressions.md) and [engineering roadmap](editing/engine-plan.md). For ShotComposer and VisualQA, include JAY3-03 in the test set and consult the SubjectLock handoff before interpreting any absence or overlay evidence.
+
 ```markdown
 # TASK-ID — Task codename
 
