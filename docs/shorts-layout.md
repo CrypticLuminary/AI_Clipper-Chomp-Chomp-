@@ -1,17 +1,22 @@
 # Shorts layout manual
 
-The visual manual's default composition is a stable streamer panel over the important gameplay. `shorts` is the default layout on the command line. It tracks source geometry independently of the output layout. The output is 9:16, with the top camera pane at 30% of the picture when a webcam is visible.
+The visual manual's default composition is a stable streamer panel over the important gameplay. `shorts` is the default layout on the command line. It tracks source geometry independently of the output layout. The output is 9:16 and normally reserves 30% of the picture for the camera when a webcam is visible.
 
 | Source condition | Shorts behavior |
 | --- | --- |
 | Webcam in a corner, along an edge, or at top/bottom center | Locate the face with YuNet, confirm the enclosing camera panel using image edges, and refine repeated panels using their independent motion. |
 | Webcam enlarges or moves | Update the source camera box while leaving the output camera seam in place. A cut is refined near the observed change. |
+| Face detection misses briefly | Verify that the same camera panel persists in the live frames. Keep the split when supported and record the recovered intervals for review. |
 | Gameplay moves within the picture | Plan a smooth crop from motion, detail and optional learned saliency. Exclude the observed webcam container and encoded black edges from the gameplay viewport. |
 | The game scene or a persistent overlay changes | Plan the next gameplay view independently from the previous scene. A short transient does not need to move the crop. |
 | No webcam panel can be found | Fill the portrait with the visible gameplay and ask the reviewer to check the action and HUD. Ambiguous or unsupported layouts use a full-picture preview. |
 | The webcam covers most of the original image | Use the available gameplay pixels and flag the span. A separately recorded gameplay feed is needed to see what the composite covered. |
 
 Use `--camera-slot bottom`, `left`, or `right` for alternate compositions. Side placements use an inset, so inspect the area it covers before approval. Use `--facecam-roi` or `--layout-plan` to override framing for a source. Edit plans store source-clock camera regions, gameplay crop keyframes, detector evidence, and framing warnings. Rerendering the same interval with a different profile or caption position reuses those observations.
+
+Automatic framing uses one destination camera slot size for the entire clip. It can increase the standard 30% slot to 35% when the extra height allows a protected crop of a portrait webcam. `--camera-fit contain` fits the whole source camera panel inside the standard slot.
+
+`--camera-motion pan` is the default. It holds small changes and moves toward a sustained displacement. `--camera-motion hold` uses a fixed gameplay crop per scene. `--camera-motion track` follows the current action estimate continuously with smoothing. A verified subject ID and protected gameplay regions are part of the [editing roadmap](editing/engine-plan.md).
 
 ## Run on Windows
 

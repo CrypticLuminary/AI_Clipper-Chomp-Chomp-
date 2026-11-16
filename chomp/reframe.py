@@ -10,6 +10,7 @@ from statistics import median
 from typing import TYPE_CHECKING
 
 from .artifacts import artifact_key, artifact_lock, digest_file, write_json
+from .camera_motion import camera_path
 from .media import LayoutSegment, Rectangle, exec_checked, probe
 
 if TYPE_CHECKING:
@@ -18,15 +19,16 @@ if TYPE_CHECKING:
 CAMERA_FRACTION = .30
 _FACE_MODEL = Path(__file__).with_name("assets") / "face_detection_yunet_2023mar.onnx"
 _SAMPLE_FPS = 4
-_PLAN_REVISION = 8
+_PLAN_REVISION = 11
 
 
-def vision_fingerprint(face_model: Path | None, saliency_model: Path | None) -> dict:
+def vision_fingerprint(face_model: Path | None, saliency_model: Path | None, *,
+                       camera_motion: str = "pan", camera_fit: str = "auto") -> dict:
     from .framing import facecam_fingerprint
 
     info = facecam_fingerprint(face_model or _FACE_MODEL)
     return {**info, "saliency_sha256": digest_file(saliency_model) if saliency_model else None,
-            "planner_revision": _PLAN_REVISION}
+            "planner_revision": _PLAN_REVISION, "camera_motion": camera_motion, "camera_fit": camera_fit}
 
 
 def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int, cache: Path, *,
@@ -43,7 +45,8 @@ def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int,
             return FramingPlan(data["layout"], data["facecam_roi"], data["detection"], segments,
                                tuple(data["warnings"]))
         plan = plan_shorts(source, start_ms, end_ms, face_model=face_model, saliency_model=saliency_model,
-                           camera_slot=camera_slot)
+                           camera_slot=camera_slot, camera_motion=fingerprint["camera_motion"],
+                           camera_fit=fingerprint["camera_fit"])
         write_json(path, asdict(plan))
         return plan
 
@@ -247,16 +250,64 @@ def _track(samples: list[Sample], width: int) -> tuple[list[Camera | None], int]
                 continue
         chosen.append(current)
         last = current
-    # Bridge brief detector dropouts in a camera region corroborated on both sides.
-    for i in range(len(chosen)):
-        if chosen[i] is not None:
-            continue
-        nearby = [j for j in range(max(0, i - 2), min(len(chosen), i + 3)) if chosen[j] is not None]
-        before = next((j for j in reversed(nearby) if j < i), None)
-        after = next((j for j in nearby if j > i), None)
-        if before is not None and after is not None and _similar(chosen[before], chosen[after], width):
-            chosen[i] = chosen[before]
     return chosen, ambiguous
+
+
+def _bridge_camera_gaps(source: Path, samples: list[Sample], tracked: list[Camera | None],
+                        frame_size: tuple[int, int], game_size: tuple[int, int],
+                        start: int, end: int, rate: Fraction) -> list[dict]:
+    """Recover geometry only when the live image supports a continuous panel."""
+    import cv2
+    import numpy as np
+
+    period_ms = 1000 // _SAMPLE_FPS
+    confirmed = []
+    i = 1
+    while i < len(tracked) - 1:
+        if tracked[i] is not None:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(tracked) and tracked[j] is None:
+            j += 1
+        gap_start, gap_end = i, j
+        i = j
+        if gap_end == len(tracked) or samples[gap_end].time_ms - samples[gap_start].time_ms > 750:
+            continue
+        before, after = tracked[gap_start - 1], tracked[gap_end]
+        if before is None or not _similar(before, after, frame_size[0]) or _iou(before.box, after.box) < .68:
+            continue
+
+        x, y, w, h = _map(before.box, frame_size, game_size)
+
+        def signature(frame):
+            region = frame[y:y + h, x:x + w]
+            return cv2.resize(region, (16, 24), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+        a, b = signature(samples[gap_start - 1].game), signature(samples[gap_end].game)
+        stable = np.abs(a - b).mean(axis=2) <= 15.
+        if float(stable.mean()) < .40:
+            continue
+        reference = (a + b) * .5
+        if float(reference[stable].std(axis=0).mean()) < 8.:
+            continue
+
+        def matches(frame):
+            error = np.abs(signature(frame) - reference).mean(axis=2)[stable]
+            return float(error.mean()) <= 12. and float((error <= 22.).mean()) >= .85
+
+        if not all(matches(sample.game) for sample in samples[gap_start:gap_end]):
+            continue
+        first = samples[gap_start].time_ms
+        last = samples[gap_end].time_ms
+        lo, hi = max(start, first - period_ms // 2), min(end, last + period_ms // 2)
+        decoded = _read_frames(source, lo, hi, *game_size, rate)
+        if (len(decoded) < (hi - lo) * rate // 1000 - 1 or not len(decoded)
+                or not all(matches(frame) for frame in decoded)):
+            continue
+        tracked[gap_start:gap_end] = [before] * (gap_end - gap_start)
+        confirmed.append({"start_ms": first, "end_ms": last, "verification_frames": len(decoded)})
+    return confirmed
 
 
 def _groups(tracked: list[Camera | None], width: int) -> list[tuple[int, int, Camera | None]]:
@@ -284,6 +335,42 @@ def _groups(tracked: list[Camera | None], width: int) -> list[tuple[int, int, Ca
             groups.append((i, j, chosen))
         i = j
     return groups
+
+
+def _confirm_edge_panels(source: Path, groups: list[tuple[int, int, Camera | None]],
+                         tracked: list[Camera | None], samples: list[Sample],
+                         size: tuple[int, int], start: int, end: int, rate: Fraction, detector) -> list[dict]:
+    """Confirm a recurrent camera layout when the cut trims its observations."""
+    evidence = []
+    period_ms = 1000 // _SAMPLE_FPS
+    anchors = [camera for _, _, camera in groups if camera is not None]
+    for k in sorted({0, len(groups) - 1}):
+        i, j, published = groups[k]
+        camera = tracked[i]
+        if published is not None or camera is None or j - i != 1:
+            continue
+        matches = [anchor for anchor in anchors if _similar(anchor, camera, size[0])
+                   and _iou(anchor.box, camera.box) >= .68]
+        if not matches:
+            continue
+        lo = max(start, samples[i].time_ms - period_ms // 2)
+        hi = min(end, samples[i].time_ms + period_ms)
+        frames = _read_frames(source, lo, hi, *size, rate)
+        edge = frames[:3] if i == 0 else frames[-3:]
+        if len(edge) < 3:
+            continue
+
+        def face_matches(frame):
+            _, faces = detector.detect(frame)
+            return faces is not None and any(_iou(tuple(round(float(v)) for v in face[:4]), camera.face) >= .32
+                                              for face in faces[:4])
+
+        if all(face_matches(frame) for frame in edge):
+            closest = max(matches, key=lambda anchor: _iou(anchor.box, camera.box))
+            groups[k] = i, j, Camera(camera.face, closest.box, camera.confidence)
+            evidence.append({"sample_ms": samples[i].time_ms, "edge": "start" if i == 0 else "end",
+                             "verification_frames": len(edge)})
+    return evidence
 
 
 def _refine_panels(groups: list[tuple[int, int, Camera | None]], samples: list[Sample],
@@ -345,6 +432,22 @@ def _refine_panels(groups: list[tuple[int, int, Camera | None]], samples: list[S
                 vy = volatility[:, ax:bx].mean(axis=1)
                 c = seam(gy, vy, y, round(.28 * h), 0, fy - 2, True)
                 d = seam(gy, vy, y + h, round(.33 * h), fy + fh + 2, gh, False)
+                if b - a <= 1.22 * (d - c):
+                    # A narrow container can have a long expanse of background
+                    # above or below the face. Recover a strong full-width seam.
+                    def outward_edge(current, low, high):
+                        candidates = []
+                        for pos in range(max(3, low), min(gh - 3, high) + 1):
+                            edge = dy[:, pos - 1, ax:bx]
+                            support = float(np.median((edge > 17.).mean(axis=1)))
+                            strength = float(gy[pos - 1])
+                            if support >= .55 and strength >= max(22., 1.4 * gy[current - 1]):
+                                candidates.append((strength * support, pos))
+                        return max(candidates)[1] if candidates else current
+
+                    max_height = int((b - a) / .49)
+                    c = outward_edge(c, max(d - max_height, y - round(.80 * h)), c - 2)
+                    d = outward_edge(d, d + 2, min(c + max_height, y + round(1.65 * h)))
                 valid = (b - a >= 1.55 * fw and d - c >= 1.22 * fh and .49 <= (b - a) / max(1, d - c) <= 3.15)
                 cached[related] = _map((a, c, b - a, d - c), game_size, frame_size) if valid else center_box
         refined.append((i, j, Camera(camera.face, cached[related], camera.confidence)))
@@ -474,7 +577,7 @@ def _gameplay_shots(groups: list[tuple[int, int, Camera | None]], samples: list[
     return output if len(output) <= 20 else groups
 
 
-def _action_windows(maps, picture: Rectangle, visible: list[Rectangle], aspect: float):
+def _action_windows(maps, picture: Rectangle, visible: list[Rectangle], aspect: float, mode: str = "pan"):
     """Select a visible crop domain once, then follow the action within it."""
     import cv2
     import numpy as np
@@ -498,7 +601,7 @@ def _action_windows(maps, picture: Rectangle, visible: list[Rectangle], aspect: 
 
     total = cv2.integral(sample_mean)
     windows = [(region, options(region)) for region in visible]
-    _, allowed = max(windows, key=lambda pair: max(
+    domain, allowed = max(windows, key=lambda pair: max(
         mass(total, rect) / sample_mass + .23 * rect[2] * rect[3] / (pw * ph) for rect in pair[1]
     ))
 
@@ -526,18 +629,15 @@ def _action_windows(maps, picture: Rectangle, visible: list[Rectangle], aspect: 
 
         return max(allowed, key=score)
 
-    initial = best_view(np.mean(maps[:3], axis=0))
+    initial = best_view(sample_mean if mode == "hold" else np.mean(maps[:3], axis=0))
     rw, rh = initial[2:]
-    last_x, last_y = initial[:2]
-    positions = []
-    for i in range(len(maps)):
-        evidence = np.mean(maps[max(0, i - 2):i + 3], axis=0)
-        favorite = best_view(evidence, (last_x, last_y))
-        # The crop moves in response to sustained evidence, with bounded pan speed.
-        step = max(3, round(pw * .035))
-        last_x += max(-step, min(step, (favorite[0] - last_x) * .48))
-        last_y += max(-step, min(step, (favorite[1] - last_y) * .48))
-        positions.append((round(last_x), round(last_y)))
+    if mode == "hold":
+        positions = [initial[:2]] * len(maps)
+    else:
+        targets = [best_view(np.mean(maps[max(0, i - 2):i + 3], axis=0), initial[:2])[:2]
+                   for i in range(len(maps))]
+        x, y, w, h = domain
+        positions = camera_path(initial[:2], targets, (rw, rh), ((x, x + w - rw), (y, y + h - rh)), mode)
     return initial, positions, (rw * rh) / max(1, pw * ph)
 
 
@@ -568,14 +668,13 @@ def _refine_switch(source: Path, guess: int, prior: Camera | None, after: Camera
     import cv2
     import numpy as np
 
-    if prior == after:
-        return guess
     # Use the render's frame grid. A coarse 4 Hz sample can show the next
     # layout early, so include enough following frames to confirm the change.
     first_frame = max(0, (guess - start - 315) * rate // 1000)
     lo = start + first_frame * 1000 // rate
     hi = min(end, guess + 250)
-    compare_faces = prior is not None and after is not None
+    same_panel = prior == after
+    compare_faces = prior is not None and after is not None and not same_panel
     w, h = frame_size if compare_faces else (224, max(2, round(224 * frame_size[1] / frame_size[0] / 2) * 2))
     frames = _read_frames(source, lo, hi, w, h, rate)
     switch = _camera_switch_frame(frames, detector, prior, after) if compare_faces else None
@@ -586,6 +685,11 @@ def _refine_switch(source: Path, guess: int, prior: Camera | None, after: Camera
         if camera:
             x, y, rw, rh = _map(camera.box, frame_size, (w, h))
             mask[y:y + rh, x:x + rw] ^= True
+    if same_panel:
+        mask.fill(True)
+        if prior:
+            x, y, rw, rh = _map(prior.box, frame_size, (w, h))
+            mask[y:y + rh, x:x + rw] = False
     if not np.any(mask):
         return guess
     diffs = [float(cv2.absdiff(a, b)[mask].mean()) for a, b in zip(frames, frames[1:])]
@@ -598,13 +702,16 @@ def _refine_switch(source: Path, guess: int, prior: Camera | None, after: Camera
 
 
 def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
-                saliency_model: Path | None, camera_slot: str) -> FramingPlan:
+                saliency_model: Path | None, camera_slot: str, camera_motion: str = "pan",
+                camera_fit: str = "auto") -> FramingPlan:
     from .framing import FramingPlan
 
     def fallback(reason: str) -> FramingPlan:
         return FramingPlan("letterbox", None, {"method": "shorts_fallback", "reason": reason},
                            warnings=(reason, "Review the complete frame for essential details."))
 
+    if camera_motion not in {"hold", "pan", "track"} or camera_fit not in {"auto", "contain"}:
+        raise ValueError("Invalid Shorts camera motion or fit policy")
     try:
         import cv2
     except ImportError:
@@ -632,14 +739,15 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
     cv2.setNumThreads(min(3, max(1, previous_threads)))
     try:
         return _plan(source, start, end, size, rate, face_model or _FACE_MODEL, saliency_model,
-                     camera_slot, fallback)
+                     camera_slot, fallback, camera_motion=camera_motion, camera_fit=camera_fit)
     except cv2.error as exc:
         raise ValueError("The local vision model could not analyze this source. Check the ONNX file and OpenCV.") from exc
     finally:
         cv2.setNumThreads(previous_threads)
 
 
-def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slot, fallback):
+def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slot, fallback, *,
+          camera_motion="pan", camera_fit="auto"):
     import cv2
 
     from .framing import FramingPlan
@@ -651,7 +759,10 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
     if len(samples) < 3:
         return fallback("There were too few decoded frames to track the scene.")
     track, ambiguous = _track(samples, frame_size[0])
+    detected_count = sum(camera is not None for camera in track)
+    bridge = _bridge_camera_gaps(source, samples, track, frame_size, game_size, start, end, rate)
     groups = _groups(track, frame_size[0])
+    edge_panels = _confirm_edge_panels(source, groups, track, samples, frame_size, start, end, rate, detector)
     if ambiguous >= len(samples) / 3 or len(groups) > 18:
         return fallback("Several possible camera regions or rapid layout changes need review.")
     groups = _refine_panels(groups, samples, frame_size, game_size)
@@ -670,6 +781,15 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
     edges.append(end)
     picture = _picture_box(samples)
     side_inset = camera_slot in ("left", "right")
+    camera_fraction = CAMERA_FRACTION
+    camera_aspect = (9 / 16) * (.43 / .75 if side_inset else 1.)
+    if camera_fit == "auto" and any(
+        camera is not None and _camera_crop(camera, camera_aspect / CAMERA_FRACTION)[1]
+        and not _camera_crop(camera, camera_aspect / .35)[1] for _, _, camera in groups
+    ):
+        camera_fraction = .35
+    if bridge:
+        warnings.add("Review the spans where webcam pixel continuity bridged brief face detection gaps.")
     for k, (i, j, camera) in enumerate(groups):
         a, b = edges[k:k + 2]
         if b - a < 90:
@@ -679,8 +799,8 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
         fit_camera = False
         if camera:
             cam_box = camera.box
-            aspect = (9 / 16) * (.43 / (CAMERA_FRACTION * .75) if side_inset else 1 / CAMERA_FRACTION)
-            view, fit_camera = _camera_crop(camera, aspect)
+            view, fit_camera = ((cam_box, True) if camera_fit == "contain" else
+                                _camera_crop(camera, camera_aspect / camera_fraction))
             cam_crop = _map(view, frame_size, size)
             source_box = _map(cam_box, frame_size, size)
             if containers and containers[-1]["end_ms"] == a and containers[-1]["source_box"] == source_box:
@@ -701,16 +821,16 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
             x, y, w, h = mask
             mask = max(0, x - 2), max(0, y - 2), w + min(2, x) + 2, h + min(2, y) + 2
         visible = _visible_regions(picture, mask)
-        main_aspect = (9 / 16) / (1 - CAMERA_FRACTION) if cam_box and not side_inset else 9 / 16
+        main_aspect = (9 / 16) / (1 - camera_fraction) if cam_box and not side_inset else 9 / 16
         maps = _heatmaps(samples[i:j], cam_box, model, frame_size)
-        first, positions, coverage = _action_windows(maps, picture, visible, main_aspect)
+        first, positions, coverage = _action_windows(maps, picture, visible, main_aspect, camera_motion)
         if first is None or coverage < .045:
             warnings.add("Camera covers the available gameplay. Review the source at that point.")
             segments.append(LayoutSegment(a, b, "letterbox"))
             continue
         if coverage < .18:
             warnings.add("An enlarged webcam leaves little visible gameplay in part of the cut.")
-        if fit_camera:
+        if fit_camera and camera_fit == "auto":
             warnings.add("A camera pane uses padding to keep the whole face visible.")
         size_game = _map(first, game_size, size)[2:]
         crop = (round(positions[0][0] * size[0] / game_size[0]), round(positions[0][1] * size[1] / game_size[1]),
@@ -724,12 +844,14 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
             yy = min(size[1] - crop[3], round(y * size[1] / game_size[1]))
             if not knots or timestamp > knots[-1][0]:
                 knots.append((timestamp, xx, yy))
+        if len({(x, y) for _, x, y in knots}) == 1:
+            knots = []
         if not camera:
             layout = "gameplay-only"
         else:
             layout = "facecam-gameplay"
         segments.append(LayoutSegment(a, b, layout, cam_crop, crop, fit_camera, False,
-                                      tuple(knots), CAMERA_FRACTION, camera_slot))
+                                      tuple(knots), camera_fraction, camera_slot))
 
     if not count:
         warnings.add("No webcam panel was verified. Review the gameplay crop and HUD.")
@@ -739,5 +861,8 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
     return FramingPlan(total_layout, segments[0].facecam_roi if len(segments) == 1 else None,
                        {"method": "shorts", "detector": "YuNet", "samples": len(samples),
                         "camera_samples": count, "camera_containers": containers,
+                        "camera_observations": detected_count, "camera_continuity": bridge,
+                        "verified_edge_panels": edge_panels,
+                        "camera_motion": camera_motion, "camera_fit": camera_fit,
                         "gameplay_evidence": "motion_and_u2netp" if model else "motion_and_detail"},
                        tuple(segments), tuple(sorted(warnings)))

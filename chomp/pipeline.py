@@ -68,6 +68,7 @@ def process(
     audio_profile: str = "original", reaction_lag_ms: int = 0, proposals_per_hour: int = 40,
     editorial_provider: EditorialProvider | None = None, semantic_budget: int = 12,
     saliency_model: Path | None = None, camera_slot: str = "top",
+    camera_motion: str = "pan", camera_fit: str = "auto",
     burn_hook: bool = False,
 ) -> dict:
     started = perf_counter()
@@ -108,7 +109,8 @@ def process(
         "camera_slot": camera_slot, "burn_hook": burn_hook,
     }
     if layout == "shorts" and facecam_roi is None and layout_plan is None:
-        config["vision"] = vision_fingerprint(facecam_model, saliency_model)
+        config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
+                                              camera_fit=camera_fit)
     elif layout == "auto-facecam" and facecam_roi is None and layout_plan is None:
         config["facecam_detector"] = facecam_fingerprint(facecam_model)
     job_id = artifact_key(config)[:24]

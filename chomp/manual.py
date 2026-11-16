@@ -30,6 +30,7 @@ def render_manual_preview(
     expected_source_id: str | None = None, layout_segments_override: list[dict] | None = None,
     parent_edit: str | None = None,
     saliency_model: Path | None = None, camera_slot: str = "top",
+    camera_motion: str = "pan", camera_fit: str = "auto",
     title: str | None = None, burn_hook: bool = False,
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
     sound_cues_path: Path | None = None, saved_sound_cues: list[dict] | None = None,
@@ -70,7 +71,8 @@ def render_manual_preview(
     if mix:
         config["sound_cues"] = [asdict(cue) for cue in mix]
     if layout == "shorts" and facecam_roi is None and overrides is None:
-        config["vision"] = vision_fingerprint(facecam_model, saliency_model)
+        config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
+                                              camera_fit=camera_fit)
     elif layout == "auto-facecam" and facecam_roi is None and overrides is None:
         config["facecam_detector"] = facecam_fingerprint(facecam_model)
     job_id = "manual-" + artifact_key(config)[:24]
