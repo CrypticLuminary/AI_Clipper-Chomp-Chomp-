@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 from .artifacts import artifact_key, artifact_lock, digest_file, write_json
 from .camera_motion import camera_path
 from .media import LayoutSegment, Rectangle, exec_checked, probe
+from .subject_lock import SourceSpan, SubjectPlan, overlap_fraction, track_source
+from .subject_view import subject_review, subject_windows
 
 if TYPE_CHECKING:
     from .framing import FramingPlan
@@ -33,7 +35,7 @@ def vision_fingerprint(face_model: Path | None, saliency_model: Path | None, *,
 
 def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int, cache: Path, *,
                        face_model: Path | None, saliency_model: Path | None, camera_slot: str,
-                       fingerprint: dict) -> FramingPlan:
+                       fingerprint: dict, subject_plan: SubjectPlan | None = None) -> FramingPlan:
     from .framing import FramingPlan
 
     key = artifact_key([source_id, start_ms, end_ms, camera_slot, fingerprint])
@@ -43,10 +45,10 @@ def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int,
             data = json.loads(path.read_text(encoding="utf-8"))
             segments = tuple(LayoutSegment(**segment) for segment in data["segments"])
             return FramingPlan(data["layout"], data["facecam_roi"], data["detection"], segments,
-                               tuple(data["warnings"]))
+                               tuple(data["warnings"]), data.get("subject_tracking"))
         plan = plan_shorts(source, start_ms, end_ms, face_model=face_model, saliency_model=saliency_model,
                            camera_slot=camera_slot, camera_motion=fingerprint["camera_motion"],
-                           camera_fit=fingerprint["camera_fit"])
+                           camera_fit=fingerprint["camera_fit"], subject_plan=subject_plan)
         write_json(path, asdict(plan))
         return plan
 
@@ -208,7 +210,7 @@ def _sample(source: Path, start: int, end: int, frame_size: tuple[int, int], det
             at = block + index * (1000 // _SAMPLE_FPS)
             if at >= end:
                 break
-            _, faces = detector.detect(frame)
+            _, faces = detector.detect(frame) if detector is not None else (None, None)
             observations = []
             if faces is not None:
                 for row in sorted(faces, key=lambda row: float(row[-1]), reverse=True)[:4]:
@@ -371,6 +373,26 @@ def _confirm_edge_panels(source: Path, groups: list[tuple[int, int, Camera | Non
             evidence.append({"sample_ms": samples[i].time_ms, "edge": "start" if i == 0 else "end",
                              "verification_frames": len(edge)})
     return evidence
+
+
+def _verify_short_opening_panel(source, groups, tracked, frame_size, start, end, rate, detector):
+    """Check a short opening panel before using it as an occlusion mask."""
+    i, j, smoothed = groups[0]
+    witnessed = tracked[0]
+    if j - i > 2 or witnessed is None or smoothed is None or _iou(witnessed.box, smoothed.box) >= .62:
+        return
+    frames = _read_frames(source, start, min(end, start + 160), *frame_size, rate)[:3]
+    if len(frames) < 3:
+        return
+    for frame in frames:
+        _, faces = detector.detect(frame)
+        boxes = [tuple(round(float(value)) for value in row[:4]) for row in faces[:4]] if faces is not None else []
+        if not any(_iou(box, witnessed.face) >= .66 for box in boxes):
+            return
+        panel = camera_container(frame, max(boxes, key=lambda box: _iou(box, witnessed.face)))
+        if panel is None or _iou(panel.box, witnessed.box) < .68:
+            return
+    groups[0] = i, j, witnessed
 
 
 def _refine_panels(groups: list[tuple[int, int, Camera | None]], samples: list[Sample],
@@ -701,12 +723,20 @@ def _refine_switch(source: Path, guess: int, prior: Camera | None, after: Camera
     return start + (first_frame + i + 1) * 1000 // rate
 
 
+def oriented_size(video: dict) -> tuple[int, int]:
+    size = int(video["width"]), int(video["height"])
+    rotation = next((int(d["rotation"]) for d in video.get("side_data_list", []) if "rotation" in d), 0)
+    return size[::-1] if rotation % 180 == 90 else size
+
+
 def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
                 saliency_model: Path | None, camera_slot: str, camera_motion: str = "pan",
-                camera_fit: str = "auto") -> FramingPlan:
+                camera_fit: str = "auto", subject_plan: SubjectPlan | None = None) -> FramingPlan:
     from .framing import FramingPlan
 
     def fallback(reason: str) -> FramingPlan:
+        if subject_plan is not None:
+            raise ValueError(f"SubjectLock could not establish a source layout. {reason}")
         return FramingPlan("letterbox", None, {"method": "shorts_fallback", "reason": reason},
                            warnings=(reason, "Review the complete frame for essential details."))
 
@@ -722,10 +752,7 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
     video = next((s for s in meta["streams"] if s["codec_type"] == "video"), None)
     if video is None:
         return fallback("The source contains no video stream.")
-    size = int(video["width"]), int(video["height"])
-    rotation = next((int(d["rotation"]) for d in video.get("side_data_list", []) if "rotation" in d), 0)
-    if rotation % 180 == 90:
-        size = size[::-1]
+    size = oriented_size(video)
     sar = video.get("sample_aspect_ratio", "1:1")
     if sar not in {"1:1", "N/A", "0:1", None}:
         return fallback("Confirm framing manually for non-square source pixels.")
@@ -739,7 +766,8 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
     cv2.setNumThreads(min(3, max(1, previous_threads)))
     try:
         return _plan(source, start, end, size, rate, face_model or _FACE_MODEL, saliency_model,
-                     camera_slot, fallback, camera_motion=camera_motion, camera_fit=camera_fit)
+                     camera_slot, fallback, camera_motion=camera_motion, camera_fit=camera_fit,
+                     subject_plan=subject_plan)
     except cv2.error as exc:
         raise ValueError("The local vision model could not analyze this source. Check the ONNX file and OpenCV.") from exc
     finally:
@@ -747,14 +775,16 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
 
 
 def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slot, fallback, *,
-          camera_motion="pan", camera_fit="auto"):
+          camera_motion="pan", camera_fit="auto", subject_plan=None):
     import cv2
 
     from .framing import FramingPlan
 
     width = min(size[0], 896)
     frame_size = width, max(2, round(size[1] * width / size[0] / 2) * 2)
-    detector = cv2.FaceDetectorYN.create(str(face_model), "", frame_size, .72, .32, 80)
+    detector = None
+    if subject_plan is None or subject_plan.source_has_overlay:
+        detector = cv2.FaceDetectorYN.create(str(face_model), "", frame_size, .72, .32, 80)
     samples, game_size = _sample(source, start, end, frame_size, detector)
     if len(samples) < 3:
         return fallback("There were too few decoded frames to track the scene.")
@@ -768,7 +798,9 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
     groups = _refine_panels(groups, samples, frame_size, game_size)
     groups = _gameplay_shots(groups, samples, frame_size, game_size)
 
-    model = ForegroundSaliency(saliency_model) if saliency_model else None
+    if subject_plan is not None and detector is not None:
+        _verify_short_opening_panel(source, groups, track, frame_size, start, end, rate, detector)
+    model = ForegroundSaliency(saliency_model) if saliency_model and subject_plan is None else None
     warnings = set()
     segments = []
     containers = []
@@ -779,7 +811,18 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
         cut = _refine_switch(source, guess, left[2], right[2], frame_size, start, end, rate, detector)
         edges.append(guess if cut - edges[-1] < 90 else cut)
     edges.append(end)
+    if any(b - a < 90 for a, b in zip(edges, edges[1:])):
+        return fallback("Layout changed faster than a safe automatic edit.")
     picture = _picture_box(samples)
+    subject = None
+    if subject_plan is not None:
+        spans = []
+        for k, (_, _, camera) in enumerate(groups):
+            overlay = _map(camera.box, frame_size, size) if camera else None
+            fraction = 1. - overlap_fraction(_map(picture, game_size, size), overlay)
+            spans.append(SourceSpan(edges[k], edges[k + 1], overlay, k > 0 and camera == groups[k - 1][2],
+                                    round(fraction, 3)))
+        subject = track_source(source, subject_plan, tuple(spans), size)
     side_inset = camera_slot in ("left", "right")
     camera_fraction = CAMERA_FRACTION
     camera_aspect = (9 / 16) * (.43 / .75 if side_inset else 1.)
@@ -792,8 +835,6 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
         warnings.add("Review the spans where webcam pixel continuity bridged brief face detection gaps.")
     for k, (i, j, camera) in enumerate(groups):
         a, b = edges[k:k + 2]
-        if b - a < 90:
-            return fallback("Layout changed faster than a safe automatic edit.")
         cam_box = None
         cam_crop = None
         fit_camera = False
@@ -822,8 +863,13 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
             mask = max(0, x - 2), max(0, y - 2), w + min(2, x) + 2, h + min(2, y) + 2
         visible = _visible_regions(picture, mask)
         main_aspect = (9 / 16) / (1 - camera_fraction) if cam_box and not side_inset else 9 / 16
-        maps = _heatmaps(samples[i:j], cam_box, model, frame_size)
-        first, positions, coverage = _action_windows(maps, picture, visible, main_aspect, camera_motion)
+        if subject is None:
+            maps = _heatmaps(samples[i:j], cam_box, model, frame_size)
+            first, positions, coverage = _action_windows(maps, picture, visible, main_aspect, camera_motion)
+        else:
+            times = [max(a, min(b - 1, sample.time_ms)) for sample in samples[i:j]]
+            first, positions, coverage = subject_windows(subject, times, size, game_size, picture, visible,
+                                                         main_aspect, camera_motion)
         if first is None or coverage < .045:
             warnings.add("Camera covers the available gameplay. Review the source at that point.")
             segments.append(LayoutSegment(a, b, "letterbox"))
@@ -853,8 +899,10 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
         segments.append(LayoutSegment(a, b, layout, cam_crop, crop, fit_camera, False,
                                       tuple(knots), camera_fraction, camera_slot))
 
-    if not count:
+    if not count and (subject_plan is None or subject_plan.source_has_overlay):
         warnings.add("No webcam panel was verified. Review the gameplay crop and HUD.")
+    if subject is not None:
+        warnings.update(subject_review(subject, segments))
     if side_inset:
         warnings.add("Check that the camera inset leaves the important UI visible.")
     total_layout = segments[0].layout if len(segments) == 1 else "temporal"
@@ -864,5 +912,6 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
                         "camera_observations": detected_count, "camera_continuity": bridge,
                         "verified_edge_panels": edge_panels,
                         "camera_motion": camera_motion, "camera_fit": camera_fit,
-                        "gameplay_evidence": "motion_and_u2netp" if model else "motion_and_detail"},
-                       tuple(segments), tuple(sorted(warnings)))
+                        "gameplay_evidence": ("subject_lock" if subject is not None else
+                                              "motion_and_u2netp" if model else "motion_and_detail")},
+                       tuple(segments), tuple(sorted(warnings)), subject)

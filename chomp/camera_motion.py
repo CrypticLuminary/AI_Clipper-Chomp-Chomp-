@@ -4,7 +4,7 @@ from __future__ import annotations
 from math import hypot
 
 
-def camera_path(initial: tuple[int, int], targets: list[tuple[int, int]],
+def camera_path(initial: tuple[int, int], targets: list[tuple[int, int] | None],
                 crop_size: tuple[int, int], limits: tuple[tuple[int, int], tuple[int, int]],
                 mode: str) -> list[tuple[int, int]]:
     """Run on evenly spaced observations. Each call starts a fresh shot."""
@@ -17,6 +17,12 @@ def camera_path(initial: tuple[int, int], targets: list[tuple[int, int]],
     pending = None
     output = []
     for target in targets:
+        observed = target is not None
+        if not observed:
+            target = tuple(position)
+            moving, pending = False, None
+        elif mode == "track":
+            moving = True
         offsets = tuple((goal - pos) / size for goal, pos, size in zip(target, position, crop_size))
         distance = hypot(*offsets)
         if mode == "pan":

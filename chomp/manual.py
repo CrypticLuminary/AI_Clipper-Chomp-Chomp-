@@ -14,9 +14,10 @@ from .clipwork import SCHEMA, create_clip, read_layout_plan, review_page
 from .framing import FramingPlan, facecam_fingerprint, plan_framing
 from .media import RENDER_VERSION, check_audio_track, probe
 from .models import checked_span
-from .reframe import cached_shorts_plan, vision_fingerprint
+from .reframe import cached_shorts_plan, oriented_size, vision_fingerprint
 from .signals import read_transcript
 from .sound import read_sound_cues
+from .subject_lock import TRACK_REVISION, read_subject_plan
 
 
 def render_manual_preview(
@@ -34,6 +35,7 @@ def render_manual_preview(
     title: str | None = None, burn_hook: bool = False,
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
     sound_cues_path: Path | None = None, saved_sound_cues: list[dict] | None = None,
+    subject_plan_path: Path | None = None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -53,6 +55,14 @@ def render_manual_preview(
     if layout_plan is not None and layout_segments_override is not None:
         raise ValueError("Supply one layout plan")
     overrides = read_layout_plan(layout_plan) if layout_plan is not None else layout_segments_override
+    subject_plan = None
+    if subject_plan_path is not None:
+        if layout != "shorts" or facecam_roi is not None or gameplay_roi is not None or overrides is not None:
+            raise ValueError("SubjectLock requires automatic Shorts framing")
+        video = next((stream for stream in meta["streams"] if stream["codec_type"] == "video"), None)
+        if video is None:
+            raise ValueError("SubjectLock requires a video stream")
+        subject_plan = read_subject_plan(subject_plan_path, source_id, start_ms, end_ms, oriented_size(video))
     mix = read_sound_cues(sound_cues_path, saved_sound_cues, duration_ms)
     transcriber = LocalTranscriber(asr_model, asr_device, asr_language) if transcribe else None
     config = {
@@ -73,6 +83,8 @@ def render_manual_preview(
     if layout == "shorts" and facecam_roi is None and overrides is None:
         config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
                                               camera_fit=camera_fit)
+        if subject_plan is not None:
+            config["vision"]["subject"] = {"revision": TRACK_REVISION, "plan": asdict(subject_plan)}
     elif layout == "auto-facecam" and facecam_roi is None and overrides is None:
         config["facecam_detector"] = facecam_fingerprint(facecam_model)
     job_id = "manual-" + artifact_key(config)[:24]
@@ -91,7 +103,7 @@ def render_manual_preview(
         if "vision" in config:
             framing = cached_shorts_plan(source, source_id, start_ms, end_ms, output_root / ".analysis",
                                          face_model=facecam_model, saliency_model=saliency_model,
-                                         camera_slot=camera_slot, fingerprint=config["vision"])
+                                         camera_slot=camera_slot, fingerprint=config["vision"], subject_plan=subject_plan)
         elif overrides is None:
             framing = plan_framing(source, start_ms, end_ms, layout, facecam_roi, facecam_model,
                                    camera_slot=camera_slot)
@@ -147,6 +159,8 @@ def rerender(
         raise ValueError("Manual preview bounds must be finite")
     same_bounds = (round(start * 1000) == plan["source_start_ms"]
                    and round(end * 1000) == plan["source_end_ms"])
+    if plan.get("subject_tracking") and not same_bounds and layout_plan is None:
+        raise ValueError("Run SubjectLock on the new source range or supply a manual layout for revised bounds")
     transcript = Path(plan["transcript_path"]) if plan.get("transcript_path") else None
     if captions_override is None and plan["caption_timing"] == "editor_supplied":
         if not same_bounds or not plan.get("captions_path"):
@@ -165,7 +179,8 @@ def rerender(
     if layout_plan is None and same_bounds:
         roi = plan.get("facecam_roi_px")
         saved_framing = FramingPlan(plan["layout"], tuple(roi) if roi else None,
-                                    plan.get("facecam_detection"), warnings=tuple(plan.get("framing_warnings", ())))
+                                    plan.get("facecam_detection"), warnings=tuple(plan.get("framing_warnings", ())),
+                                    subject_tracking=plan.get("subject_tracking"))
     return render_manual_preview(
         Path(plan["source"]), output_root, rights_ref=plan["rights_ref"], start_s=start, end_s=end,
         expected_source_id=plan["source_id"], transcript_path=transcript, audio_stream=plan["audio_stream"],

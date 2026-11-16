@@ -160,6 +160,8 @@ def create_clip(
     }
     if framing.detection:
         plan["facecam_detection"] = framing.detection
+    if framing.subject_tracking is not None:
+        plan["subject_tracking"] = framing.subject_tracking
     if sound_cues:
         plan["sound_cues"] = [asdict(cue) for cue in sound_cues]
     write_json(work / edit_name, plan)
@@ -198,6 +200,7 @@ def create_clip(
         "audio_stream": audio_stream, "fit_facecam": framing.fit_facecam,
         "title": title, "title_source": title_source if title else None,
         **({"facecam_detection": framing.detection} if framing.detection else {}),
+        **({"subject_id": framing.subject_tracking["subject_id"]} if framing.subject_tracking else {}),
     }
 
 
