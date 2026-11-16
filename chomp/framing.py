@@ -23,6 +23,7 @@ class FramingPlan:
     detection: dict | None = None
     segments: tuple[LayoutSegment, ...] = ()
     warnings: tuple[str, ...] = ()
+    subject_tracking: dict | None = None
 
     @property
     def fit_facecam(self) -> bool:

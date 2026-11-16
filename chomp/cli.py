@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="gameplay crop movement for automatic Shorts framing")
     p.add_argument("--camera-fit", choices=["auto", "contain"], default="auto",
                    help="protect the face with an automatic fill or contain the entire webcam panel")
+    p.add_argument("--subject-plan", type=Path, help="source-hashed subject and protected regions for an exact Shorts clip")
     p.add_argument("--title", help="set a truthful title for a manual clip")
     p.add_argument("--burn-hook", action="store_true", help="show the title briefly at the start")
     p.add_argument("--sound-cues", type=Path, help="local audio cue schedule for an exact clip")
@@ -146,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     if (args.start is None) != (args.end is None):
         p.error("--start and --end must be supplied together")
+    if args.subject_plan is not None and (args.start is None or args.layout != "shorts"
+                                          or args.layout_plan or roi or gameplay):
+        p.error("--subject-plan needs an exact automatic Shorts clip without a manual layout or crop")
     if args.start is not None:
         if len(args.input) != 1 or not args.render:
             p.error("Manual preview needs one --input and --render")
@@ -156,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.input[0]), args.output, start_s=args.start, end_s=args.end,
                 transcribe=args.refine_captions or (args.transcribe and args.transcript is None), **shared,
                 title=args.title, burn_hook=args.burn_hook, sound_cues_path=args.sound_cues,
+                subject_plan_path=args.subject_plan,
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
             _print({"source": args.input[0], "error": str(exc)})
