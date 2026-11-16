@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from .contract import read_json, validate_plan
 from .evidence import build_bundle, read_verified_bundle
@@ -12,6 +13,11 @@ from .provider import CodexCLI
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "shots":
+        from ..shotcomposer.__main__ import main as shots_main
+
+        return shots_main(argv[1:])
     parser = argparse.ArgumentParser(prog="chomp director", description="Evaluate bounded editorial plans on local evidence")
     commands = parser.add_subparsers(dest="command", required=True)
 

@@ -79,3 +79,5 @@ Four decoded frames per edited reference are in the local `outputs/edit-fx-01/in
 Select the compatible Git commit and keep each phase isolated. Inspect a failing source/output pair and retain exact clock bounds before changing behavior. Reuse existing layout, caption, audio and review contracts when their semantics fit. Record upstream code and model licenses separately and keep private media out of Git. Keep citations, technical measurements, axis-specific human ratings and approvals traceable to rendered hashes. Run matching before/after clips and report any unverified scenario. Stop at the first Phase 1 review gate before starting SubjectLock.
 
 The [SubjectLock review handoff](../tasks/EDIT-FX-02.md) records Phase 2 performance and the current review gate. [JAY3-03 and earlier framing regressions](regressions.md) carry forward to ShotComposer and VisualQA.
+
+The [ShotComposer workflow](shotcomposer.md) executes a selected Director plan and records source evidence and preview hashes. See [FX03 verification](../tasks/EDIT-FX-03.md) for the Jay3 and Emiru previews, clock checks and playback review status.
