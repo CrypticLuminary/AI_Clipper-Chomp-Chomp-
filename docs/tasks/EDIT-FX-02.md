@@ -32,7 +32,7 @@ The same-bounds rerender uses the saved geometry and evidence. For changed bound
 
 ## Matching media evidence
 
-A is StableCamera hold and B is StableCamera pan, both at `220acdb`. C is SubjectLock with the same pan limits. All methods use the same input, source bounds, preview profile and original audio. Public examples use local H.264 copies with a silent audio track so the existing renderer can open them. C receives explicit seeds and optional protected boxes. A and B receive the normal automatic inputs. The labels used for scoring remain in separate files. Median tracker errors omit reviewed seed frames. The crop score checks the viewport against the labeled box, including when the tracker has no usable observation.
+A is StableCamera hold and B is StableCamera pan, both at `220acdb`. C is SubjectLock with the same pan limits. All methods use the same input, source bounds, preview profile and original audio. Public examples use local H.264 copies with a silent audio track so the existing renderer can open them. C receives explicit seeds and optional protected boxes. It also receives the known uncomposited-source flag on the two public recordings. A and B receive the normal automatic inputs. Both baselines letterbox all 12 seconds of FaceOcc2, while C renders a portrait crop. The identical target coverage counts measure geometric inclusion. The labels used for scoring remain in separate files. Median tracker errors omit reviewed seed frames. The crop score checks the viewport against the labeled box, including when the tracker has no usable observation.
 
 | Recording and exact source range | A / B / C frames with ≥90% target box in viewport | C compared boxes, median center error | C tracking result |
 | --- | --- | --- | --- |
