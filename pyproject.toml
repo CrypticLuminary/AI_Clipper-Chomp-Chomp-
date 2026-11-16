@@ -17,6 +17,7 @@ asr = ["faster-whisper>=1.1,<2", "av>=11,<19"]
 diarize = ["resemblyzer>=0.1.3,<1", "scikit-learn>=1.3,<2", "numpy>=1.24,<3"]
 diarize-sherpa = ["sherpa-onnx>=1.10", "numpy>=1.24,<3"]
 facecam = ["opencv-python-headless>=4.8,<5"]
+director = ["jsonschema>=4.23,<5"]
 dev = ["pytest>=8,<10", "numpy>=1.24,<3"]
 
 [project.scripts]
@@ -29,7 +30,7 @@ include = ["chomp*"]
 version = {attr = "chomp.__version__"}
 
 [tool.setuptools.package-data]
-chomp = ["assets/*.onnx", "assets/*-LICENSE.txt"]
+chomp = ["assets/*.onnx", "assets/*-LICENSE.txt", "director/contracts/*.schema.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

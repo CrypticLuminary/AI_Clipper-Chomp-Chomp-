@@ -42,4 +42,6 @@ Captions use high contrast with up to two lines and preserve the transcript word
 
 Approve only after watching the exported clip and checking the camera, gameplay and key UI, captions, audio, and editorial payoff. A legal crop can still hide an important part of the source. Open its saved plan if you need to adjust the crop or reframe a cut. Use the independent benchmark and review workflow in the [Stage 1 guide](stage1-quality.md).
 
+See [Finishing a Short](shorts-finishing.md) for editorial checks and timecoded sound cues.
+
 Model and design sources are [OpenCV YuNet](https://huggingface.co/opencv/face_detection_yunet), [U²-Net upstream](https://github.com/xuebinqin/U-2-Net), the [pinned U²-Net-small ONNX mirror](https://huggingface.co/nfa04/u2netp-onnx), and [AutoFlip's scene-aware crop planning](https://research.google/blog/autoflip-an-open-source-framework-for-intelligent-video-reframing/).

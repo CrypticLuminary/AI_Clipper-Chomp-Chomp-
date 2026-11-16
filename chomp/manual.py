@@ -16,6 +16,7 @@ from .media import RENDER_VERSION, check_audio_track, probe
 from .models import checked_span
 from .reframe import cached_shorts_plan, vision_fingerprint
 from .signals import read_transcript
+from .sound import read_sound_cues
 
 
 def render_manual_preview(
@@ -31,6 +32,7 @@ def render_manual_preview(
     saliency_model: Path | None = None, camera_slot: str = "top",
     title: str | None = None, burn_hook: bool = False,
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
+    sound_cues_path: Path | None = None, saved_sound_cues: list[dict] | None = None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -50,6 +52,7 @@ def render_manual_preview(
     if layout_plan is not None and layout_segments_override is not None:
         raise ValueError("Supply one layout plan")
     overrides = read_layout_plan(layout_plan) if layout_plan is not None else layout_segments_override
+    mix = read_sound_cues(sound_cues_path, saved_sound_cues, duration_ms)
     transcriber = LocalTranscriber(asr_model, asr_device, asr_language) if transcribe else None
     config = {
         "schema": SCHEMA, "render_version": RENDER_VERSION, "source": str(source), "source_id": source_id,
@@ -64,6 +67,8 @@ def render_manual_preview(
         "title_source": title_source if title else None,
         "saved_framing": asdict(saved_framing) if saved_framing else None,
     }
+    if mix:
+        config["sound_cues"] = [asdict(cue) for cue in mix]
     if layout == "shorts" and facecam_roi is None and overrides is None:
         config["vision"] = vision_fingerprint(facecam_model, saliency_model)
     elif layout == "auto-facecam" and facecam_roi is None and overrides is None:
@@ -105,7 +110,7 @@ def render_manual_preview(
                 profile=profile, caption_position=caption_position, audio_profile=audio_profile,
                 captions_override=captions_override, layout_override=overrides,
                 shorts_style=layout == "shorts",
-                title=title, title_source=title_source, burn_hook=burn_hook,
+                title=title, title_source=title_source, burn_hook=burn_hook, sound_cues=mix,
             )
             report = {
                 **clip, "schema_version": SCHEMA, "job_id": job_id, "source": str(source), "source_id": source_id,
@@ -127,6 +132,7 @@ def rerender(
     profile: str | None = None, caption_position: str | None = None, audio_profile: str | None = None,
     layout_plan: Path | None = None, captions_override: Path | None = None,
     title: str | None = None, burn_hook: bool | None = None,
+    sound_cues_path: Path | None = None,
 ) -> dict:
     plan = json.loads(edit_path.read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or plan.get("schema_version") != SCHEMA:
@@ -169,4 +175,5 @@ def rerender(
         title_source="editor" if title is not None else plan.get("title_source"),
         burn_hook=plan.get("burn_hook", False) if burn_hook is None else burn_hook,
         parent_edit=digest_file(edit_path), saved_framing=saved_framing,
+        sound_cues_path=sound_cues_path, saved_sound_cues=plan.get("sound_cues"),
     )

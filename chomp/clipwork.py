@@ -16,6 +16,7 @@ from .editorial import quote_title, validate_title
 from .framing import FramingPlan
 from .media import LayoutSegment, crop_position, exported_audio_level, exported_loudness, render_preview
 from .models import TranscriptSegment, checked_span
+from .sound import SoundCue, cues_in_range
 
 SCHEMA = "0.5"
 PROFILES = {"preview": (540, 960), "final": (1080, 1920)}
@@ -97,6 +98,7 @@ def create_clip(
     captions_override: Path | None = None, layout_override: list[dict] | None = None,
     shorts_style: bool = False,
     title: str | None = None, title_source: str | None = None, burn_hook: bool = False,
+    sound_cues: tuple[SoundCue, ...] = (),
 ) -> dict:
     checked_span(start_ms, end_ms, duration_ms)
     if profile not in PROFILES:
@@ -133,6 +135,8 @@ def create_clip(
     warnings.extend(captions.warnings)
     if not captions.count:
         warnings.append("No captions for this interval. Confirm whether speech requires subtitles.")
+    if cues_in_range(sound_cues, start_ms, end_ms):
+        warnings.append("Check the timing and level of the added sound cues during playback.")
     srt_name, mp4_name, edit_name = f"{stem}.srt", f"{stem}.mp4", f"{stem}.edit.json"
     srt = work / srt_name if captions.count else None
     if srt:
@@ -156,6 +160,8 @@ def create_clip(
     }
     if framing.detection:
         plan["facecam_detection"] = framing.detection
+    if sound_cues:
+        plan["sound_cues"] = [asdict(cue) for cue in sound_cues]
     write_json(work / edit_name, plan)
 
     mean = None
@@ -167,7 +173,7 @@ def create_clip(
         render_preview(source, mp4, start_ms, end_ms, width, height,
                        captions_path=srt, audio_stream=audio_stream, segments=segments,
                        caption_position=caption_position, audio_profile=audio_profile, shorts=shorts_style,
-                       hook=title if burn_hook else None)
+                       hook=title if burn_hook else None, sound_cues=sound_cues)
         measured = exported_audio_level(mp4)
         mean = measured if math.isfinite(measured) else None
         audio_warning = mean is None or mean < -55

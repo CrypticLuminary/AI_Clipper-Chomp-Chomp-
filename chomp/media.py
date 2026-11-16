@@ -14,8 +14,9 @@ import sys
 import tempfile
 import threading
 
-from .artifacts import staged_file
+from .artifacts import digest_file, staged_file
 from .models import checked_span
+from .sound import SoundCue, cues_in_range
 
 SAMPLE_RATE = 2000
 SOURCE_CLOCK_AUDIO_FILTER = "aresample=async=1:first_pts=0"
@@ -330,7 +331,7 @@ def render_preview(
     layout: str = "auto", audio_stream: int = 0, fit_facecam: bool = False,
     preserve_gameplay: bool = False, segments: tuple[LayoutSegment, ...] = (),
     caption_position: str = "lower", audio_profile: str = "original", shorts: bool = False,
-    hook: str | None = None,
+    hook: str | None = None, sound_cues: tuple[SoundCue, ...] = (),
 ) -> None:
     """Render static or temporal composition while keeping one continuous audio timeline."""
     meta = probe(source)
@@ -454,8 +455,26 @@ def render_preview(
             graph += f";{stage}null[out]"
 
         audio_filter = SOURCE_CLOCK_AUDIO_FILTER + f",apad,atrim=duration={duration}"
-        if audio_profile == "balanced":
-            audio_filter += ",loudnorm=I=-16:TP=-1.5:LRA=11"
+        loudness = ",loudnorm=I=-16:TP=-1.5:LRA=11" if audio_profile == "balanced" else ""
+        audio_inputs, audio_map = [], ["-map", f"0:a:{audio_stream}", "-af", audio_filter + loudness]
+        active_cues = cues_in_range(sound_cues, start_ms, end_ms)
+        if active_cues:
+            stereo = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+            graph += f";[0:a:{audio_stream}]{audio_filter},{stereo}[sourceaudio]"
+            labels = ["[sourceaudio]"]
+            for i, cue in enumerate(active_cues, 1):
+                audio_inputs.extend(("-protocol_whitelist", "file,pipe", "-i", cue.path))
+                label = f"[sound{i}]"
+                labels.append(label)
+                length = cue.duration_ms / 1000
+                fade = min(.012, length / 4)
+                graph += (f";[{i}:a:0]atrim=start={_seconds(cue.offset_ms)}:duration={length:.3f},"
+                          f"asetpts=PTS-STARTPTS,{stereo},afade=t=in:d={fade:.6f},"
+                          f"afade=t=out:st={length - fade:.6f}:d={fade:.6f},"
+                          f"volume={float(cue.gain_db):.3f}dB,adelay={cue.at_ms - start_ms}:all=1{label}")
+            graph += (";" + "".join(labels) + f"amix=inputs={len(labels)}:duration=first:"
+                      f"dropout_transition=0:normalize=0,alimiter=limit=.84:level=false:latency=true{loudness}[mix]")
+            audio_map = ["-map", "[mix]"]
         graph_args = ["-filter_complex", graph]
         if len(graph) > 9000:
             (scratch / "video-filters.txt").write_text(graph, encoding="ascii")
@@ -463,9 +482,9 @@ def render_preview(
         encoding = (["-b:v", "12M", "-maxrate", "18M", "-bufsize", "24M"]
                     if shorts and width >= 1080 else ["-crf", "20" if width >= 1080 else "23"])
         args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error", "-xerror",
-                "-ss", _seconds(start_ms), "-i", str(source), "-t", duration,
+                "-ss", _seconds(start_ms), "-i", str(source), *audio_inputs, "-t", duration,
                 "-filter_complex_threads", "1", *graph_args,
-                "-map", "[out]", "-map", f"0:a:{audio_stream}", "-af", audio_filter,
+                "-map", "[out]", *audio_map,
                 "-c:v", "libx264", "-preset", "veryfast", *encoding,
                 "-pix_fmt", "yuv420p", "-fps_mode", "vfr", "-c:a", "aac", "-b:a", "160k",
                 "-ar", "48000", "-ac", "2", "-disposition:a:0", "default",
@@ -486,4 +505,6 @@ def render_preview(
                 raise RuntimeError("Rendered video ended early or ran past the clip")
         exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-xerror",
                       "-i", str(staged), "-f", "null", "-"], timeout=timeout)
+        if any(digest_file(Path(path)) != digest for path, digest in {(cue.path, cue.sha256) for cue in active_cues}):
+            raise ValueError("A sound cue asset changed during rendering")
         staged.replace(output)

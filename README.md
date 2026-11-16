@@ -47,4 +47,6 @@ The default Shorts layout detects and tracks webcam containers and focuses the g
 
 See the [Stage 1 workflow](docs/stage1-quality.md) for local Whisper and semantic model setup, temporal layouts, caption corrections, final exports, and the benchmark. The [architecture proposal](docs/architecture-v1.md) describes the later roadmap.
 
+Use the [experimental editorial director](docs/editorial-director.md) to compare source-cited text and visual plans with the same local evidence window.
+
 The project can keep the default pipeline on the machine. Optional local model and detector weights are installed separately. Human editorial quality, timing, and framing are evaluated on real footage in addition to the offline tests.

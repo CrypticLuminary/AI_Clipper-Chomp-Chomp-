@@ -28,6 +28,7 @@ def _revision_command(command: str, argv: list[str]) -> int:
         p.add_argument("--start", type=float, help="updated start in source seconds")
         p.add_argument("--end", type=float, help="updated end in source seconds")
         p.add_argument("--captions", type=Path, help="corrected SRT on the updated clip clock")
+        p.add_argument("--sound-cues", type=Path, help="replacement sound cues on the source clock")
         p.add_argument("--title", help="set a reviewed title of 3–8 words")
         p.add_argument("--burn-hook", action=argparse.BooleanOptionalAction)
         _render_options(p, optional=True)
@@ -35,7 +36,8 @@ def _revision_command(command: str, argv: list[str]) -> int:
         action = lambda: rerender(args.edit, args.output, start_s=args.start, end_s=args.end,
                                   profile=args.profile, audio_profile=args.audio_profile,
                                   caption_position=args.caption_position, layout_plan=args.layout_plan,
-                                  captions_override=args.captions, title=args.title, burn_hook=args.burn_hook)
+                                  captions_override=args.captions, title=args.title, burn_hook=args.burn_hook,
+                                  sound_cues_path=args.sound_cues)
     else:
         p.add_argument("--review", type=Path, required=True)
         p.add_argument("--clip", type=int, default=1)
@@ -60,8 +62,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("rerender", "approve"):
         return _revision_command(argv[0], argv[1:])
+    if argv and argv[0] == "director":
+        from .director.__main__ import main as director_main
+
+        return director_main(argv[1:])
     p = argparse.ArgumentParser(prog="chomp", description="Find and review highlights from authorized local VODs",
-                                epilog="Revision commands: chomp rerender --help and chomp approve --help")
+                                epilog="Review commands: chomp rerender, chomp approve, and chomp director")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--input", action="append", required=True, metavar="LOCAL_VIDEO", help="local VOD file; repeat for batch")
     p.add_argument("--output", type=Path, default=Path("outputs"))
@@ -91,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--camera-slot", choices=["top", "bottom", "left", "right"], default="top")
     p.add_argument("--title", help="set a truthful title for a manual clip")
     p.add_argument("--burn-hook", action="store_true", help="show the title briefly at the start")
+    p.add_argument("--sound-cues", type=Path, help="local audio cue schedule for an exact clip")
     p.add_argument("--gameplay-roi", help="source pixel rectangle x,y,w,h")
     p.add_argument("--layout", choices=["shorts", "auto", "auto-facecam", "facecam-gameplay", "gameplay-only", "fit", "letterbox"],
                    default="shorts", help="shorts tracks the webcam container and action on selected ranges")
@@ -139,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             report = render_manual_preview(
                 Path(args.input[0]), args.output, start_s=args.start, end_s=args.end,
                 transcribe=args.refine_captions or (args.transcribe and args.transcript is None), **shared,
-                title=args.title, burn_hook=args.burn_hook,
+                title=args.title, burn_hook=args.burn_hook, sound_cues_path=args.sound_cues,
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
             _print({"source": args.input[0], "error": str(exc)})
@@ -149,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.title is not None:
         p.error("--title applies to an exact manual interval or a rerender")
+    if args.sound_cues is not None:
+        p.error("--sound-cues applies to an exact manual interval or a rerender")
     try:
         provider = OllamaProvider(args.semantic_model, port=args.semantic_port) if args.semantic_model else None
     except ValueError as exc:
