@@ -1,0 +1,79 @@
+# Editing engine audit and implementation plan
+
+## Baseline
+
+Bridge `1e7e922` is an ancestor of Stage 1 quality `0f159e0`. The pushed editorial branch at `f187fd1` descends from both and adds the timed audio mixer and evidence contract. It also contains the local and remote `feat/vod-foundation` histories. GitHub had no newer editing branch at intake. Phase 1 is isolated on `work/edit-fx-01-stablecamera` from `f187fd1`.
+
+The baseline ran on Windows 11 with Python 3.13, OpenCV 4.14 and FFmpeg 9.0.2. All 261 tests passed. I regenerated the three Emiru intervals from their stored transcript snapshots and recreated the 780–795 s Nightcrawler source interval with that same engine. The Emiru source is 5,335,583 ms, 1920 × 1080 at 60 fps with a single mixed AAC track. Raw footage, reference stills and renders are local review evidence.
+
+| Existing module | Working behavior | Remaining work |
+| --- | --- | --- |
+| `reframe.py`, `framing.py` | YuNet observations, container estimation, short-range sampling, scene histograms, relative crops outside the verified camera, editable path knots. Slot position is already independent of source coordinates. | A face miss can defeat panel continuity. A portrait container can fall back to black margins. Motion scoring moves the viewport even when little changes in the useful view. Legacy auto-facecam has its own conservative fallback. |
+| `media.py` | Validates boxes, time and crop keyframes, composes split and full-frame layouts with FFmpeg, uses continuous selected-track audio, and verifies the resulting H.264/AAC and decode. | Intentional shot execution needs an adapter from verified regions to the existing layouts. Shot paths and actual pixels need additional visual verification. |
+| `captions.py`, `asr.py` | Selected-range Whisper, source-clock word estimates when available, two-line SRT, overlap and confidence warnings. | Timing quality and overlapping speakers need measurement. Generated text can compete with native subtitles. Burn-in has three anchor choices and one Shorts style. |
+| `clipwork.py`, `manual.py` | Exact-range exports, cached analysis, editable layout plans, caption overrides, versioned rerenders, SHA-pinned approval. Renderer has an independent hook overlay. | Expose narrow framing controls and usable diagnosis in review. Future protected areas need source-to-output mapping. |
+| `sound.py` | Local gain-controlled effects at source times, fades, asset hashes, clipping against changed bounds. | Existing balanced profile uses FFmpeg loudness normalization. Measure per-platform targets and dialogue intelligibility. Source cut lists and mixed-track ducking require explicit decisions. |
+| `chomp/director` | Provider-independent grounded intent and frozen evidence with independently verified image hashes and source-clock citations. | It stops at proposed plans. A validated plan still needs explicit region-to-shot execution, review and a renderer-safe plan. |
+
+### Reproduced defects
+
+- **Emiru candidate 3, 16,490–29,590 ms.** At 19,490–19,740 ms, the regenerated portrait shows a small full-source view. Matching source frames retain the same camera panel, with the streamer's hand over their face. YuNet misses three successive samples at 19,490, 19,740 and 19,990 ms. The greedy gap loop recovers the last two and leaves the first as a letterbox segment. The archived and regenerated layout both show this. The top slot contains a portrait box with side padding. The estimated container begins at y=639 although the coherent top edge in the image is near y=488. Reprojecting the detected face and its margins against a 35% slot shows that a protected fill is geometrically possible.
+- **Emiru candidates 1 and 2.** The split with a stable full-width camera pane is intact in sampled frames. At 1,709,500 ms the generated caption occupies the same lower content zone that native dialogue occupies in nearby frames. Preserve words and subtitle timings while correcting placement in Phase 4. Baseline original-track integrated loudness is −22.14, −25.40 and −22.51 LUFS for candidates 1–3 respectively, with true peaks at −5.02, −9.88 and −7.13 dBTP. These are signal measurements. Listening and editorial approval remain pending.
+- **Nightcrawler, 780,000–795,000 ms.** The historical failed export used a fixed upper-left webcam box. The regenerated baseline detects the actual right-side webcam and its source zoom changes. It includes a very large webcam that covers most of the source and a 150 ms uncertain tail. Quantify the software viewport from source-coordinate paths separately from in-game camera motion and character motion. Keep visibility claims bounded by the available source image and sampled checks.
+
+The multi-creator manual and illustrated guide define composition and editorial scenarios. The existing reference atlas adds coverage hypotheses. The edited Shorts below establish visible presentation patterns. The matching raw development intervals establish the camera defects.
+
+## Architecture and timing
+
+1. **Editorial intent** names the in/out window, beats, subjects, required visual evidence and proposed shot behavior. `chomp/director` verifies citations and source identity. A person or any compliant provider can supply the same contract.
+2. **Source observations** identify the source hash, oriented picture geometry, decoded timestamps, camera containers, pose confidence, scene cuts, optional annotated targets and audio/caption assets. The planning cache is keyed by source identity, range, detector fingerprint, planner revision and settings.
+3. **Spatial planning** establishes a destination slot for the clip and estimates source geometry separately for each scene. Recovery requires current source pixels. The scene planner limits panning and reports uncertainty. Later workflows add subject IDs, confidence, protected regions and explicit fallbacks.
+4. **Shot execution** converts reviewed intent into adjacent source-clock layout segments and bounded crop trajectories. Extend the existing layout primitives only for supported operations. The output time map will describe source intervals kept and their clip-local offsets when pacing edits arrive.
+5. **Finishing** uses that time map for faithful captions, optional hooks, selected-track audio and timecoded effects. Style edits reuse saved layout and transcript artifacts. Rendering validates input bounds, produces continuous outputs and hashes the reviewed revisions.
+6. **Quality evidence** combines plan metrics, decoded-frame spot checks, full decode, measured audio and independent playback review. Keep sampled scores, limitations and approvals traceable to the exact preview.
+
+Open-source options, verified licenses and the separate model notices are in the [source research matrix](upstream-research.md). Stage 1 continues with its installed OpenCV and FFmpeg runtime. Camera gap confirmation may decode a short window only around a candidate gap. A future heavier tracker must beat the lightweight baseline on the same windows, with wall time, memory, coverage and loss recovery reported.
+
+| Boundary | Contract and validation |
+| --- | --- |
+| Evidence → editorial intent | Keep `chomp-evidence/1` and `chomp-editorial/1`. A human or provider plan refers to the source SHA and hashed evidence bundle with shot start/end, layout, target subject IDs, protected region IDs, crop behavior and evidence IDs. Validate citations, supported operations and shot coverage before execution. |
+| Evidence → spatial planner | Use source-clock integer milliseconds and oriented source coordinates. Convert evidence-image rectangles to source pixels using the recorded dimensions. Track bounds, confidence and loss per subject ID in Phase 2. A source resize or speed change creates a new geometry or clock context. |
+| Spatial planner → renderer | Reuse `LayoutSegment`. Adjacent half-open source intervals cover the approved range. In-bounds rectangles and crop keyframes define geometry. Carry warnings when a required region is lost or a proposed layout needs manual review. |
+| Approved edit → captions and audio | Today clip time is source time minus the in-point. In Phase 5 an ordered list of kept source spans maps to cumulative output offsets. Captions and sound cues use the same map, with the original source words and track choices retained with the edit. |
+| Render → review | Pin source, evidence, edit and rendered asset digests. Record detector and package revisions and track clock/raster conversions. Tie QA findings and approval to the exact preview revision. Audio and caption-only changes reuse the existing vision plan. |
+
+## Roadmap and acceptance tests
+
+| Phase | Change and dependency | Review gate |
+| --- | --- | --- |
+| EDIT-FX-01 StableCamera | Build on the current crop planner and renderer. Validate brief camera misses against current pixels, recover coherent container edges, fit a protected webcam with a stable destination slot, and add hold, pan and track policies for the current action estimate. Reset the path at source scene changes. | Candidate 3 has zero involuntary letterbox time and a filled camera when safe. Source panels that vanish remain reviewable. Candidates 1 and 2 retain usable framing. Verify synthetic stationary-jitter and sustained-movement paths, narrow boxes, source zooms, and matching source/render frames on all four real intervals. |
+| EDIT-FX-02 SubjectLock | Add protected regions, user/plan subject seeds, a persistent ID and confidence. Compare fixed, motion-driven and lightweight OpenCV tracking before a segmentation dependency. | Improve visible target fraction or path stability without reducing annotated required-region coverage. Track crop travel, peak velocity and acceleration, reversals, lost-track seconds and playback ratings on Nightcrawler and an unrelated moving source. Report source occlusions separately from track losses. |
+| EDIT-FX-03 ShotComposer | After stable geometry and IDs, adapt supported reviewed shots to the existing renderer. Start with split, evidence, main-only and reaction close-up. Add safe intentional transitions with source and audio continuity. | Require contiguous coverage, in-frame crops and zero unexpected blank frames. Verify CFR transition times within one output frame. Check continuous source audio across visual cuts, plus gameplay, horror, evidence/discussion and IRL or no-camera shot behaviors. |
+| EDIT-FX-04 CaptionStudio | Keep approved words and use a protected output geometry mapping. Benchmark selected-range forced alignment only where timed words need repair. Add bounded ASS styles and safe anchors. | Require zero word omissions in approved spans. Compare median and 90th percentile word timing error against manually aligned samples. Report overlap and reading speed, check intersection with hand-labeled protected regions, and validate a caption-only rerender. |
+| EDIT-FX-05 Pacing and AudioFinish | Add explicit keep/cut intervals and a reusable time map. Edit audio with fades and selected tracks. Evaluate loudness and true peak on finished clips. | Check output duration and cue positions against the keep list, agreement between source-track and output sync, permitted loudness/peak limits per profile, and clicks and preserved payoff in listening and playback. |
+| EDIT-FX-06 VisualQA | Expand the Phase 0 frame and path metrics into stored QA reports for each preview, with evidence at transitions. | Verify dimensions, duration, streams, valid crops, A/V offsets when measurable, black spans, layouts, subject/protected-region visibility, caption timing/placement and loudness. Score human playback properties separately. |
+
+## Reference scenarios and evidence status
+
+Four decoded frames per edited reference are in the local `outputs/edit-fx-01/intake/shorts-atlas-*.jpg` sheets. Time ranges below refer to those edited files. They help define composition tests.
+
+| Reference | Observed edit and what it makes readable | Engine requirement |
+| --- | --- | --- |
+| Emiru's Best Jumpscare | The game and streamer share the frame through the 16.5 s reaction. A reaction close-up appears by 22.8 s. Both shots support reading the cause and response. | Support a stable split, a timed reaction cut and return. |
+| Emiru Gets Jumpscared | Browser, game and chat appear above the same bottom reaction pane between 2.5 s and 20.6 s. The evidence changes while the viewer can find the speaker. | Support a verified evidence pane and a stable reaction slot. |
+| Emiru Embarrassed Mizkif | The conversation occupies one panel and a reaction appears inset below. By 23.7 s, the reactor fills the frame. The edit makes the response visible with its context. | Preserve multiple participants and allow a reviewed close-up at the payoff. |
+| Tyler1 Ranks Emiru | The presenter and board share the upper frame at 10.4 s. The board fills that pane by 24.7 s. Emiru stays visible underneath. | Keep the board legible and hold the reaction slot while switching the evidence view. |
+| CaseOh Spammed the Kitty | The small illuminated object in a dark main pane is visible at 13.0 s. At 17.9 s the webcam setup is still visible during a face miss. | Protect the small object and retain a verified webcam during occlusion. |
+| CaseOh Has a… | The reveal occupies much of the main pane in the 3.1–5.2 s samples. The reaction remains available above. | Track the reveal and preserve room for the reaction. |
+| CaseOh's Timing | Several gameplay scenes appear under a persistent title and top camera slot over 63.6 s. The shared placement makes the montage readable across cuts. | Build an explicit edit list with source spans and a consistent title slot. |
+| iShowSpeed's Athleticism | Vertical views alternate between close-up setup and a wider running view at 28.4 and 39.3 s. The wider view keeps the athlete and markers visible. | Use a subject box and course context across intentional angle changes. |
+| Even He Was… | The prop fills the view at 6.6 s. The shot shows the person interacting with it at 11.2 s. | Protect the prop and change framing to show its interaction at the intended beat. |
+| Speed Got Fat | One person fills the frame across sampled poses and individual words receive emphasis. | Keep a portrait subject and support selective caption emphasis. |
+| I Love to See These Changes | The lower pane changes from a speaker to a network diagnostics page by 36.7 s. The top commentator stays visible. | Protect the evidence text and change the lower shot at the requested time. |
+| Bucky Is STILL Insane After Nerfs | The top reaction slot persists across gameplay and the results screen at 93.4 s. The action and final result occupy the main pane. | Hold the destination slot and preserve the game target and outcome across a longer edited sequence. |
+| Emiru/Nightcrawler source dev tests | Webcam portrait/zoom changes and mixed action difficulty at known source times. | Distinguish source composition from the viewport and flag occlusion. |
+| Future raw sources | Unedited horror, conversation, IRL, multiple people, no webcam and an unusual aspect ratio remain required for field coverage. | Use distinct creators and an untouched holdout. Use synthesized media for mechanical regressions. |
+
+## Persistent work rules
+
+Select the compatible Git commit and keep each phase isolated. Inspect a failing source/output pair and retain exact clock bounds before changing behavior. Reuse existing layout, caption, audio and review contracts when their semantics fit. Record upstream code and model licenses separately and keep private media out of Git. Keep citations, technical measurements, axis-specific human ratings and approvals traceable to rendered hashes. Run matching before/after clips and report any unverified scenario. Stop at the first Phase 1 review gate before starting SubjectLock.
