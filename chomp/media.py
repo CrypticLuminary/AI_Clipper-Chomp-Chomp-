@@ -501,6 +501,11 @@ def render_preview(
             graph += (";" + "".join(labels) + f"amix=inputs={len(labels)}:duration=first:"
                       f"dropout_transition=0:normalize=0,alimiter=limit=.84:level=false:latency=true{loudness}[mix]")
             audio_map = ["-map", "[mix]"]
+        elif len(segments) > 1:
+            # FFmpeg 8.0.1 can stall on split/concat video with a separate
+            # audio filter graph when the selected audio stream starts late.
+            graph += f";[0:a:{audio_stream}]{audio_filter}{loudness}[selected_audio]"
+            audio_map = ["-map", "[selected_audio]"]
         graph_args = ["-filter_complex", graph]
         if len(graph) > 9000:
             (scratch / "video-filters.txt").write_text(graph, encoding="ascii")

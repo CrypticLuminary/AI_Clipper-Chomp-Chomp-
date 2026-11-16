@@ -3,6 +3,7 @@
 - Status: implementation and local verification complete. Draft review and human playback pending.
 - Base: `work/edit-fx-02-subjectlock` at `8dd1cb52634c4eb7dd639499a4eda5b4a4709d77`.
 - Branch: [feat/edit-fx03-shotcomposer](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/tree/feat/edit-fx03-shotcomposer).
+- Review: [Draft PR #10](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/pull/10).
 - Workspace: Codex desktop and Windows PowerShell, `D:\AI _Clipper\chomp-chomp\edit-fx-03`.
 - Attribution: `ASTRA-FX03` for source research, contract design and initial implementation, based on the owner's description. `SOL61-FX03` for continuation, integration, fixes, test execution and media checks, based on this session's model configuration.
 - Owned paths: `chomp/shotcomposer/`, two Director schemas, CLI and media integration, approval artifact checks, `tests/test_shotcomposer.py`, and ShotComposer reference and verification docs.
@@ -26,6 +27,8 @@ Set-Location -LiteralPath 'D:\AI _Clipper\chomp-chomp\edit-fx-03'
 
 The private review packet is under `outputs/fx03-verify/review.html`. It links the clips, original excerpts, source and output frames around the cuts, timing records, and the exact plans. The render reports contain FFprobe metadata and artifact checksums.
 
+The first draft's Ubuntu run reproduced a timeout also present on SubjectLock. Both were running FFmpeg `8.0.1-3ubuntu2`. The exact delayed-audio legacy fixture stalled with separate video and audio filter graphs. Moving the existing selected audio filter into the same graph preserved the 5.000 s video/audio durations and completed the manual render, caption revision and approval check on the pinned Ubuntu build. The focused Windows renderer suites passed 46 tests after that fix. [Base failure](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43866468608) · [First FX03 run](https://github.com/CrypticLuminary/AI_Clipper-Chomp-Chomp-/actions/runs/43925455054).
+
 | Source | Decision and technical result |
 | --- | --- |
 | JAY3-03, `test.mp4`, [73,350, 90,170) ms | Gameplay and streamer → streamer while the original webcam covers the last player region → gameplay and streamer. Decoded source transitions land at frames 22 and 244 (73,716.667 and 77,416.667 ms). The 222-frame reaction replaces the sliver of gameplay. Projection into the new crop covers at least 90% of all 14 labeled visible player boxes and fully covers all 24 labeled HUD boxes. |
@@ -38,7 +41,7 @@ Dense camera checks cover all 1,010 decoded frames using the existing YuNet mode
 
 ## Render cost
 
-One measured pair per output size on the same Windows machine and exact Jay3 range, with the same captions, audio selection, encoder settings and existing source on disk. These measurements exclude discovery, ASR and region analysis. The new path includes source hash verification and a check of the source file identity and timestamps across rendering.
+One measured pair per output size on the same Windows machine and exact Jay3 range, with the same captions, audio selection, encoder settings and existing source on disk. Measurements precede the legacy Ubuntu scheduling fix and exclude discovery, ASR and region analysis. The new path includes source hash verification and a check of the source file identity and timestamps across rendering.
 
 | Size | SubjectLock wall time | ShotComposer wall time | FFmpeg peak working set, old / new |
 | --- | ---: | ---: | ---: |
