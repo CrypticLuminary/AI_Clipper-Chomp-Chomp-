@@ -15,6 +15,8 @@ import json
 import os
 import tempfile
 
+from ..artifacts import digest_file
+
 SCHEMA = "clipledger/1"
 DECISIONS = {"good", "bad", "uncertain"}
 TECH = {"yes", "no", "n/a"}
@@ -61,6 +63,7 @@ class Manifest:
     duration_ms: int
     candidate_count: int
     clips: tuple[Clip, ...]
+    source_id: str | None = None
 
 
 def _object(value: Any, where: str) -> dict:
@@ -90,19 +93,27 @@ def _load_json(path: Path) -> Any:
 
 
 def read_manifest(path: str | Path) -> Manifest:
-    """Read the shared source-clock fields from v0.2 through v0.4 review queues."""
+    """Read review queues and versioned manual previews."""
     path = Path(path)
     data = _object(_load_json(path), "review manifest")
-    if data.get("schema_version") not in ("0.2", "0.3", "0.4"):
-        raise ClipLedgerError("Unsupported review_queue schema_version (expected '0.2', '0.3' or '0.4')")
+    current = data.get("schema_version") == "0.5"
+    if not current and data.get("schema_version") not in ("0.2", "0.3", "0.4"):
+        raise ClipLedgerError("Unsupported review manifest version")
     job_id = _required_string(data.get("job_id"), "job_id")
     source = _required_string(data.get("source"), "source")
-    duration = _integer(data.get("duration_ms"), "duration_ms", 1)
-    raw = data.get("clips")
+    manual = current and "clips" not in data and "source_duration_ms" in data
+    duration = _integer(data.get("source_duration_ms" if manual else "duration_ms"), "duration_ms", 1)
+    source_id = _required_string(data.get("source_id"), "source_id") if current else None
+    if manual:
+        start = _integer(data.get("start_ms"), "start_ms")
+        end = _integer(data.get("end_ms"), "end_ms")
+        raw = [{**data, "candidate": {"start_ms": start, "end_ms": end, "anchor_ms": (start + end) // 2}}]
+    else:
+        raw = data.get("clips")
     if not isinstance(raw, list) or len(raw) > 10:
         raise ClipLedgerError("clips must be a list of at most 10 selected candidates")
-    candidate_count = _integer(data.get("candidate_count"), "candidate_count")
-    count = _integer(data.get("selected_for_review"), "selected_for_review")
+    candidate_count = 1 if manual else _integer(data.get("candidate_count"), "candidate_count")
+    count = 1 if manual else _integer(data.get("selected_for_review"), "selected_for_review")
     if count != len(raw) or candidate_count < len(raw):
         raise ClipLedgerError("Selected, clip list, and candidate counts disagree")
 
@@ -124,11 +135,22 @@ def read_manifest(path: str | Path) -> Manifest:
         occurrences[key] = occurrence + 1
         # Independent of preview filename, ranking score and category; only
         # identical spans within the same job need a collision counter.
-        payload = json.dumps((job_id, source, a, b, anchor, occurrence),
+        identity = (job_id, source, a, b, anchor, occurrence)
+        if current:
+            hashes = _object(item.get("artifact_sha256"), f"clips[{rank}].artifact_sha256")
+            for kind in ("preview", "edit_spec", "captions_srt"):
+                value = item.get(kind)
+                if value is not None:
+                    artifact = path.parent / Path(_required_string(value, kind))
+                    expected = _required_string(hashes.get(kind), f"{kind} hash")
+                    if artifact.is_file() and digest_file(artifact) != expected:
+                        raise ClipLedgerError(f"{artifact.name} changed since export. Rerender before reviewing it.")
+            identity += (source_id, hashes)
+        payload = json.dumps(identity,
                              separators=(",", ":"), ensure_ascii=False)
         clip_id = sha256(payload.encode("utf-8")).hexdigest()[:24]
         clips.append(Clip(clip_id, f"selected_{rank:03d}", a, b, anchor, preview))
-    return Manifest(path, job_id, source, duration, candidate_count, tuple(clips))
+    return Manifest(path, job_id, source, duration, candidate_count, tuple(clips), source_id)
 
 
 def _empty_annotation(clip: Clip) -> dict[str, Any]:
@@ -151,7 +173,7 @@ def _template(manifest: Manifest, source_id: str | None) -> dict[str, Any]:
         # Default is the *exact* source string from the manifest, not
         # platform-dependent normalization of a Windows/Unix pathname.
         "source_id": _required_string(
-            manifest.source if source_id is None else source_id, "source_id"),
+            (manifest.source_id or manifest.source) if source_id is None else source_id, "source_id"),
         "clips": [_empty_annotation(clip) for clip in manifest.clips],
     }
 

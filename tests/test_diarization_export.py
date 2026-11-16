@@ -353,9 +353,8 @@ class TestDiarizationExportSafety:
         # The existing turns file was NOT overwritten
         assert turns_path.read_bytes() == concurrent_content
 
-        # The identity map template was already written before turns write failed
-        # (documenting the non-atomic export limitation)
-        assert identity_path.is_file()
+        # No half-export is published when a late conflict is detected.
+        assert not identity_path.exists()
 
         # Actionable error message naming the conflicting turns file
         err = str(exc_info.value)

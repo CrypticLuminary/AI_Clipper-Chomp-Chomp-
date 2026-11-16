@@ -1,42 +1,105 @@
-"""FFmpeg audio scan and human-review preview render; no remote acquisition."""
+"""Selected-track audio and validated FFmpeg portrait exports."""
 from __future__ import annotations
 
 from array import array
+from dataclasses import dataclass
+from fractions import Fraction
 import json
 import math
 import re
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 
-SAMPLE_RATE = 2000  # low-cost detector, not ASR quality
-# Preserve the elapsed time before delayed audio packets when writing timestamp-free PCM.
+from .artifacts import staged_file
+from .models import checked_span
+
+SAMPLE_RATE = 2000
 SOURCE_CLOCK_AUDIO_FILTER = "aresample=async=1:first_pts=0"
+RENDER_VERSION = 6
+LAYOUTS = {"facecam-gameplay", "gameplay-only", "fit", "letterbox"}
+Rectangle = tuple[int, int, int, int]
 
 
-def exec_checked(args: list[str]) -> subprocess.CompletedProcess[str]:
+@dataclass(frozen=True)
+class LayoutSegment:
+    start_ms: int
+    end_ms: int
+    layout: str
+    facecam_roi: Rectangle | None = None
+    gameplay_roi: Rectangle | None = None
+    fit_facecam: bool = True
+    preserve_gameplay: bool = True
+    gameplay_path: tuple[tuple[int, int, int], ...] = ()
+    camera_fraction: float = .35
+    camera_slot: str = "top"
+
+
+def crop_position(path: tuple[tuple[int, int, int], ...], time_ms: int) -> tuple[int, int]:
+    """Evaluate source-clock crop keyframes, holding the first and last positions."""
+    if time_ms <= path[0][0]:
+        return tuple(path[0][1:])
+    for (a, ax, ay), (b, bx, by) in zip(path, path[1:]):
+        if time_ms <= b:
+            f = (time_ms - a) / (b - a)
+            return round(ax + (bx - ax) * f), round(ay + (by - ay) * f)
+    return tuple(path[-1][1:])
+
+
+def _crop_axis(path: tuple[tuple[int, int, int], ...], start_ms: int, axis: int) -> str:
+    expr = str(path[-1][axis])
+    for left, right in reversed(list(zip(path, path[1:]))):
+        if left[axis] == right[axis]:
+            value = str(left[axis])
+        else:
+            start = _seconds(left[0] - start_ms)
+            length = _seconds(right[0] - left[0])
+            value = f"{left[axis]}+({right[axis] - left[axis]})*clip((t-{start})/{length},0,1)"
+        finish = _seconds(right[0] - start_ms)
+        expr = f"if(lt(t,{finish}),{value},{expr})"
+    return f"'{expr}'"
+
+
+def exec_checked(args: list[str], *, timeout: float = 900, cwd: Path | None = None,
+                 binary: bool = False) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(args, text=True, capture_output=True, check=True)
+        kwargs = {} if binary else {"encoding": "utf-8", "errors": "replace"}
+        return subprocess.run(args, capture_output=True, check=True, timeout=timeout, cwd=cwd, **kwargs)
     except FileNotFoundError as exc:
         raise RuntimeError(f"Missing executable: {args[0]} (install FFmpeg and add it to PATH)") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{args[0]} timed out after {timeout:g} seconds") from exc
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"Command failed: {args[0]}: {exc.stderr[-1000:]}") from exc
+        stderr = exc.stderr[-2000:]
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        raise RuntimeError(f"Command failed: {args[0]}: {stderr}") from exc
 
 
 def probe(path: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(path)
-    result = exec_checked(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)])
+    result = exec_checked(["ffprobe", "-v", "error", "-show_entries", "format=duration,start_time",
+                           "-show_streams", "-of", "json", str(path)], timeout=60)
     info = json.loads(result.stdout)
     try:
         duration_ms = round(float(info["format"]["duration"]) * 1000)
     except (ValueError, KeyError, TypeError, OverflowError) as exc:
         raise ValueError("Source has no known duration") from exc
-    if duration_ms <= 0 or not math.isfinite(duration_ms):
+    if duration_ms <= 0:
         raise ValueError("Source duration must be positive and finite")
     if not any(s.get("codec_type") == "audio" for s in info.get("streams", [])):
         raise ValueError("Source must contain an audio stream for the VOD baseline")
-    return {"duration_ms": duration_ms, "streams": info.get("streams", [])}
+    return {"duration_ms": duration_ms, "streams": info["streams"]}
+
+
+def check_audio_track(meta: dict, audio_stream: int) -> None:
+    count = sum(s.get("codec_type") == "audio" for s in meta["streams"])
+    if type(audio_stream) is not int or not 0 <= audio_stream < count:
+        raise ValueError(f"Audio track {audio_stream} unavailable; source has {count} audio track(s)")
 
 
 def rms_dbfs(data: bytes) -> float:
@@ -52,177 +115,375 @@ def rms_dbfs(data: bytes) -> float:
     return max(-90., min(0., 10 * math.log10(power / (32768**2))))
 
 
-def scan_audio(path: Path, *, audio_stream: int = 0) -> list[float]:
-    """Stream one-second audio levels on the source clock from the selected track."""
-    cmd = [
-        "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(path),
-        "-map", f"0:a:{audio_stream}", "-af", SOURCE_CLOCK_AUDIO_FILTER,
+def _seconds(ms: int) -> str:
+    return f"{ms / 1000:.3f}"
+
+
+def _audio_input(path: Path, audio_stream: int, start_ms: int = 0) -> list[str]:
+    if type(audio_stream) is not int or audio_stream < 0:
+        raise ValueError("audio_stream must be a nonnegative integer")
+    return ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-xerror",
+            "-ss", _seconds(start_ms), "-i", str(path), "-map", f"0:a:{audio_stream}", "-vn"]
+
+
+def decode_audio_window(path: Path, start_ms: int, end_ms: int, *, audio_stream: int = 0) -> bytes:
+    """Decode a bounded window, padding delayed or exhausted tracks on its clock."""
+    checked_span(start_ms, end_ms, end_ms)
+    duration = end_ms - start_ms
+    if duration > 10 * 60 * 1000:
+        raise ValueError("Decode speech audio in windows of ten minutes or less")
+    args = _audio_input(path, audio_stream, start_ms) + [
+        "-af", SOURCE_CLOCK_AUDIO_FILTER + ",apad", "-t", _seconds(duration),
+        "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1",
+    ]
+    result = exec_checked(args, timeout=max(60, duration / 1000), binary=True)
+    bytes_expected = duration * 32
+    return result.stdout[:bytes_expected].ljust(bytes_expected, b"\0")
+
+
+def scan_audio(path: Path, *, audio_stream: int = 0, hop_ms: int = 1000,
+               duration_ms: int | None = None) -> list[float]:
+    """Stream source-clock audio levels without keeping the waveform in memory."""
+    if type(hop_ms) is not int or hop_ms < 10:
+        raise ValueError("Audio hop must be an integer of at least 10 ms")
+    duration_ms = probe(path)["duration_ms"] if duration_ms is None else duration_ms
+    cmd = _audio_input(path, audio_stream) + [
+        "-af", SOURCE_CLOCK_AUDIO_FILTER + ",apad", "-t", _seconds(duration_ms),
         "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "pipe:1",
     ]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError as exc:
-        raise RuntimeError("FFmpeg is required") from exc
-    curve: list[float] = []
-    assert proc.stdout is not None and proc.stderr is not None
-    while True:
-        chunk = proc.stdout.read(SAMPLE_RATE * 2)
-        if not chunk:
-            break
-        curve.append(rms_dbfs(chunk))
-    proc.stdout.close()
-    error = proc.stderr.read().decode("utf-8", errors="replace")
-    proc.stderr.close()
-    if proc.wait() != 0:
-        raise RuntimeError(f"Audio scan failed: {error[-1000:]}")
+    # A file-backed stderr buffer cannot fill a pipe while stdout is drained.
+    with tempfile.TemporaryFile() as errors:
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors)
+        except FileNotFoundError as exc:
+            raise RuntimeError("FFmpeg is required") from exc
+        timed_out = threading.Event()
+
+        def stop() -> None:
+            timed_out.set()
+            proc.kill()
+
+        watchdog = threading.Timer(max(60, duration_ms / 1000), stop)
+        watchdog.daemon = True
+        watchdog.start()
+        curve = []
+        try:
+            assert proc.stdout is not None
+            with proc.stdout:
+                while chunk := proc.stdout.read(SAMPLE_RATE * hop_ms // 1000 * 2):
+                    curve.append(rms_dbfs(chunk))
+            result = proc.wait()
+        finally:
+            watchdog.cancel()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if timed_out.is_set():
+            raise RuntimeError("Audio scan timed out")
+        if result:
+            errors.seek(0, 2)
+            errors.seek(max(0, errors.tell() - 2000))
+            raise RuntimeError(f"Audio scan failed: {errors.read().decode('utf-8', 'replace')}")
     return curve
 
 
 def exported_audio_level(path: Path) -> float:
-    """Decode the *rendered* audio and report mean dBFS.
-
-    A stream can exist but be silent: checking only AAC codec presence is not
-    sufficient. -inf means complete digital silence. This is a diagnostic,
-    not a reason to drop intentional quiet gameplay footage.
-    """
     result = exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path),
-                           "-map", "0:a:0", "-vn", "-af", "volumedetect",
-                           "-f", "null", "-"])
+                           "-map", "0:a:0", "-vn", "-af", "volumedetect", "-f", "null", "-"])
     match = re.search(r"mean_volume:\s*(-?inf|-?\d+(?:\.\d+)?) dB", result.stderr)
     if match is None:
         raise RuntimeError("Unable to measure decoded export audio level")
     return float(match.group(1))
 
 
-def resolve_layout(layout: str, facecam_roi: tuple[int, int, int, int] | None) -> str:
-    """Select one of the two primary clip formats without pretending to detect a facecam."""
-    if layout not in {"auto", "facecam-gameplay", "gameplay-only", "fit", "letterbox"}:
-        raise ValueError("Unknown layout. Use auto, facecam-gameplay, gameplay-only, fit, or letterbox")
+def exported_loudness(path: Path) -> dict:
+    result = exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path),
+                           "-map", "0:a:0", "-vn", "-af", "loudnorm=print_format=json", "-f", "null", "-"])
+    match = re.search(r'\{\s*"input_i".*?\}', result.stderr, flags=re.DOTALL)
+    if not match:
+        raise RuntimeError("Unable to measure decoded export loudness")
+    result_data = json.loads(match.group())
+
+    def finite(key: str) -> float | None:
+        value = float(result_data[key])
+        return value if math.isfinite(value) else None
+
+    return {"integrated_lufs": finite("input_i"), "true_peak_dbtp": finite("input_tp")}
+
+
+def resolve_layout(layout: str, facecam_roi: Rectangle | None) -> str:
+    if layout not in LAYOUTS | {"auto"}:
+        raise ValueError("Unknown layout")
     choice = ("facecam-gameplay" if facecam_roi else "gameplay-only") if layout == "auto" else layout
     if choice == "facecam-gameplay" and facecam_roi is None:
-        raise ValueError("facecam-gameplay requires --facecam-roi x,y,w,h; automatic facecam detection is not implemented")
+        raise ValueError("facecam-gameplay requires --facecam-roi x,y,w,h")
     return choice
 
 
-def _validate_roi(roi: tuple[int, int, int, int] | None, vw: int, vh: int, name: str) -> tuple[int, int, int, int] | None:
+def validate_roi(roi: Rectangle | None, vw: int, vh: int, name: str) -> Rectangle | None:
     if roi is None:
         return None
-    if len(roi) != 4 or any(type(value) is not int for value in roi):
+    if not isinstance(roi, (tuple, list)) or len(roi) != 4 or any(type(value) is not int for value in roi):
         raise ValueError(f"{name} must be a rectangle of four integers")
     x, y, w, h = roi
-    if min(x, y) < 0 or min(w, h) <= 0 or x+w > vw or y+h > vh:
+    if min(x, y) < 0 or min(w, h) <= 1 or x + w > vw or y + h > vh:
         raise ValueError(f"{name} must fit within the source video ({vw}x{vh})")
-    return roi
+    return x, y, w, h
+
+
+def _composite(inp: str, dst: str, seg: LayoutSegment, width: int, height: int, label: str,
+               sar: Fraction) -> str:
+    def crop(roi: Rectangle | None, path: tuple = ()) -> str:
+        choice = ""
+        if roi is not None:
+            x, y, w, h = roi
+            if path:
+                x = _crop_axis(path, seg.start_ms, 1)
+                y = _crop_axis(path, seg.start_ms, 2)
+            choice = f"crop={w}:{h}:{x}:{y}:exact=1,"
+        if sar != 1:
+            choice += f"scale='max(2,trunc(iw*{sar}/2)*2)':ih,setsar=1,"
+        return choice
+
+    def scale(w: int, h: int, fill: bool) -> str:
+        direction = "increase" if fill else "decrease"
+        size = f"{w}:{h}"
+        fit = f"scale={size}:force_original_aspect_ratio={direction}:force_divisible_by=2"
+        edge = f"crop={size}" if fill else f"pad={size}:(ow-iw)/2:(oh-ih)/2:color=0x101419"
+        return f"{fit},{edge},setsar=1"
+
+    game_crop = crop(seg.gameplay_roi, seg.gameplay_path)
+    if seg.layout == "facecam-gameplay":
+        if seg.camera_slot in ("left", "right"):
+            cam_w = round(width * .43 / 2) * 2
+            cam_h = round(height * seg.camera_fraction * .75 / 2) * 2
+            margin = round(width * .05)
+            x = margin if seg.camera_slot == "left" else width - cam_w - margin
+            y = round(height * .07)
+            return (f"{inp}split=2[{label}cam][{label}game];"
+                    f"[{label}cam]{crop(seg.facecam_roi)}{scale(cam_w, cam_h, not seg.fit_facecam)}[{label}inset];"
+                    f"[{label}game]{game_crop}{scale(width, height, True)}[{label}main];"
+                    f"[{label}main][{label}inset]overlay={x}:{y},format=yuv420p{dst}")
+        camera_height = round(height * seg.camera_fraction / 2) * 2
+        bottom = height - camera_height
+        if seg.preserve_gameplay:
+            low_w, low_h = max(2, width // 6 * 2), max(2, bottom // 6 * 2)
+            game = (
+                f"[{label}game]{game_crop}split=2[{label}sharp][{label}soft];"
+                f"[{label}sharp]scale={width}:{bottom}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2,setsar=1[{label}wide];"
+                f"[{label}soft]{scale(low_w, low_h, True)},gblur=sigma=10,"
+                f"eq=brightness=-0.30:saturation=0.5,scale={width}:{bottom},setsar=1[{label}matte];"
+                f"[{label}matte][{label}wide]overlay=(W-w)/2:(H-h)/6[{label}bottom];"
+            )
+        else:
+            game = f"[{label}game]{game_crop}{scale(width, bottom, True)}[{label}bottom];"
+        order = (f"[{label}bottom][{label}top]" if seg.camera_slot == "bottom" else
+                 f"[{label}top][{label}bottom]")
+        return (f"{inp}split=2[{label}cam][{label}game];"
+                f"[{label}cam]{crop(seg.facecam_roi)}{scale(width, camera_height, not seg.fit_facecam)}[{label}top];"
+                f"{game}"
+                f"{order}vstack=inputs=2,format=yuv420p{dst}")
+    if seg.layout == "fit":
+        blur_w, blur_h = max(2, width // 6 * 2), max(2, height // 6 * 2)
+        return (f"{inp}{game_crop}split=2[{label}fg][{label}bg];"
+                f"[{label}fg]scale={width}:{height}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2,setsar=1[{label}fit];"
+                f"[{label}bg]{scale(blur_w, blur_h, True)},gblur=sigma=10,"
+                f"eq=brightness=-0.19:saturation=0.55,scale={width}:{height},setsar=1[{label}blur];"
+                f"[{label}blur][{label}fit]overlay=(W-w)/2:(H-h)/2,format=yuv420p{dst}")
+    return f"{inp}{game_crop}{scale(width, height, seg.layout == 'gameplay-only')},format=yuv420p{dst}"
+
+
+def _hook_ass(title: str, width: int, height: int, y: int, length_ms: int) -> str:
+    text = " ".join(title.split()).translate(str.maketrans({"{": "(", "}": ")", "\\": "∖"}))
+    if len(text) > 72:
+        raise ValueError("Shorten the hook title")
+    words = text.split()
+    if len(text) > 24 and len(words) > 1:
+        options = [(" ".join(words[:i]), " ".join(words[i:])) for i in range(1, len(words))]
+        text = "\\N".join(min(options, key=lambda parts: max(map(len, parts))))
+    end = min(175, length_ms // 10)
+    if end <= 0:
+        raise ValueError("The clip is too short for a hook")
+    font = round(width * .064)
+    return (
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: 2\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Hook,Arial,{font},&H00EAFBFF,&H00EAFBFF,&H670B111A,&H670B111A,"
+        f"-1,0,0,0,100,100,0,0,3,{max(3, width // 76)},0,5,0,0,0,1\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        f"Dialogue: 0,0:00:00.00,0:00:{end // 100:02}.{end % 100:02},Hook,,0,0,0,,"
+        f"{{\\pos({width // 2},{y})\\fad(80,120)}}{text}\n"
+    )
 
 
 def render_preview(
     source: Path, output: Path, start_ms: int, end_ms: int,
     width: int = 540, height: int = 960, *,
     captions_path: Path | None = None,
-    facecam_roi: tuple[int, int, int, int] | None = None,
-    gameplay_roi: tuple[int, int, int, int] | None = None,
+    facecam_roi: Rectangle | None = None,
+    gameplay_roi: Rectangle | None = None,
     layout: str = "auto", audio_stream: int = 0, fit_facecam: bool = False,
+    preserve_gameplay: bool = False, segments: tuple[LayoutSegment, ...] = (),
+    caption_position: str = "lower", audio_profile: str = "original", shorts: bool = False,
+    hook: str | None = None,
 ) -> None:
-    """Render exact selected range into one of two primary vertical layouts.
-
-    facecam-gameplay: upper 35% confirmed facecam ROI, lower 65% gameplay.
-    gameplay-only: fill portrait with centered gameplay crop (not a letterbox strip).
-    fit: fit the full recording against a blurred background.
-    letterbox: legacy diagnostic mode, preserving full landscape video.
-
-    There is no automatic facecam detector or intelligent action tracking yet.
-    Cropping can omit HUD/edge action; check previews before publishing.
-    """
-    from .models import checked_span
+    """Render static or temporal composition while keeping one continuous audio timeline."""
     meta = probe(source)
     checked_span(start_ms, end_ms, meta["duration_ms"])
     video = next((stream for stream in meta["streams"] if stream.get("codec_type") == "video"), None)
     if not video:
         raise ValueError("The source has no video stream to render")
-    if min(width, height) < 2 or width % 2 or height % 2:
+    if any(type(size) is not int or size < 8 or size % 2 for size in (width, height)):
         raise ValueError("Output width/height must be positive even numbers")
-    if type(audio_stream) is not int or audio_stream < 0:
-        raise ValueError("audio_stream must be a nonnegative integer")
-    audio_tracks = [s for s in meta["streams"] if s.get("codec_type") == "audio"]
-    if audio_stream >= len(audio_tracks):
-        raise ValueError(f"Audio track {audio_stream} unavailable; video has {len(audio_tracks)} audio track(s)")
+    if audio_profile not in {"original", "balanced"} or caption_position not in {"upper", "lower", "middle"}:
+        raise ValueError("Unknown audio profile or caption position")
+    check_audio_track(meta, audio_stream)
     vw, vh = int(video["width"]), int(video["height"])
-    facecam_roi = _validate_roi(facecam_roi, vw, vh, "Facecam ROI")
-    gameplay_roi = _validate_roi(gameplay_roi, vw, vh, "Gameplay ROI")
-    chosen_layout = resolve_layout(layout, facecam_roi)
-
-    # Probe source and build filters *before* starting the FFmpeg subprocess.
-    # The same output timestamp source must apply to video, audio and captions.
-    output.parent.mkdir(parents=True, exist_ok=True)
-    duration = (end_ms - start_ms) / 1000
-    base = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error",
-            "-ss", str(start_ms / 1000), "-i", str(source), "-t", str(duration)]
-
-    def crop_filter(roi: tuple[int, int, int, int] | None) -> str:
-        if roi is None:
-            return ""
-        x, y, w, h = roi
-        return f"crop={w}:{h}:{x}:{y},"
-
-    if chosen_layout == "facecam-gameplay":
-        assert facecam_roi is not None
-        x, y, w, h = facecam_roi
-        top = round(height * .35 / 2) * 2
-        bottom = height - top
-        if fit_facecam:
-            camera = (f"scale={width}:{top}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                      f"pad={width}:{top}:(ow-iw)/2:(oh-ih)/2")
-        else:
-            camera = f"scale={width}:{top}:force_original_aspect_ratio=increase,crop={width}:{top}"
-        vf = (f"[0:v]split=2[cam][game];"
-              f"[cam]crop={w}:{h}:{x}:{y},{camera},setsar=1[camout];"
-              f"[game]{crop_filter(gameplay_roi)}scale={width}:{bottom}:force_original_aspect_ratio=increase,"
-              f"crop={width}:{bottom},setsar=1[gameout];"
-              f"[camout][gameout]vstack=inputs=2,format=yuv420p[stage]")
-    elif chosen_layout == "gameplay-only":
-        vf = (f"[0:v]{crop_filter(gameplay_roi)}scale={width}:{height}:force_original_aspect_ratio=increase,"
-              f"crop={width}:{height},setsar=1,format=yuv420p[stage]")
-    elif chosen_layout == "fit":
-        # Blur at lower resolution before filling the portrait canvas.
-        blur_w, blur_h = max(2, width // 6 * 2), max(2, height // 6 * 2)
-        vf = (
-            f"[0:v]{crop_filter(gameplay_roi)}split=2[foreground][background];"
-            f"[foreground]scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fit];"
-            f"[background]scale={blur_w}:{blur_h}:force_original_aspect_ratio=increase,"
-            f"crop={blur_w}:{blur_h},gblur=sigma=10,scale={width}:{height},setsar=1[blur];"
-            "[blur][fit]overlay=(W-w)/2:(H-h)/2,format=yuv420p[stage]"
-        )
-    else:  # explicit legacy letterbox, for diagnostics/comparison
-        vf = (f"[0:v]{crop_filter(gameplay_roi)}scale={width}:{height}:force_original_aspect_ratio=decrease,"
-              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[stage]")
-    if captions_path is not None and captions_path.is_file() and captions_path.stat().st_size:
-        if (captions_path.parent.resolve() != output.parent.resolve()
-            or not captions_path.name.startswith(("candidate_", "manual_"))
-            or captions_path.suffix.lower() != ".srt"):
-            raise ValueError("Generated SRT must be beside output, named candidate_*.srt or manual_*.srt")
-        vf += (f";[stage]subtitles=filename={captions_path.name}:"
-               f"force_style='FontName=Arial,FontSize=10,Alignment=2,MarginV=24,Outline=1,Shadow=0'[out]")
-    else:
-        vf += ";[stage]null[out]"
-
-    # -map 0:a:N specifies the Nth AUDIO stream, not the Nth overall stream.
-    base += ["-filter_complex", vf, "-map", "[out]", "-map", f"0:a:{audio_stream}",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-             "-disposition:a:0", "default", "-movflags", "+faststart", str(output)]
+    rotation = next((int(entry["rotation"]) for entry in video.get("side_data_list", [])
+                     if "rotation" in entry), 0)
+    if rotation % 180 == 90:
+        vw, vh = vh, vw
     try:
-        subprocess.run(base, text=True, capture_output=True, check=True, cwd=str(output.parent))
-    except FileNotFoundError as exc:
-        raise RuntimeError("FFmpeg is required") from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"Rendering failed: {exc.stderr[-1000:]}") from exc
-    if not output.is_file() or output.stat().st_size == 0:
-        raise RuntimeError("Render produced no media")
-    rendered = probe(output)
-    outvideo = next((s for s in rendered["streams"] if s.get("codec_type") == "video"), {})
-    if (outvideo.get("codec_name"), outvideo.get("width"), outvideo.get("height")) != ("h264", width, height):
-        raise RuntimeError("Rendered video did not pass H.264 portrait verification")
-    if not any(s.get("codec_type") == "audio" and s.get("codec_name") == "aac" for s in rendered["streams"]):
-        raise RuntimeError("Rendered clip is missing AAC audio")
-    if abs(rendered["duration_ms"] - (end_ms - start_ms)) > 500:
-        raise RuntimeError("Rendered clip has unexpected duration; verify source timestamps")
+        sar = Fraction(video.get("sample_aspect_ratio", "1:1").replace(":", "/"))
+        if sar <= 0:
+            sar = Fraction(1)
+    except (ValueError, ZeroDivisionError):
+        sar = Fraction(1)
+    if rotation % 180 == 90:
+        sar = 1 / sar
+    if not segments:
+        segments = (LayoutSegment(start_ms, end_ms, resolve_layout(layout, facecam_roi), facecam_roi,
+                                  gameplay_roi, fit_facecam, preserve_gameplay),)
+    if len(segments) > 24:
+        raise ValueError("At most 24 layout segments are supported per clip")
+    cursor = start_ms
+    for seg in segments:
+        checked_span(seg.start_ms, seg.end_ms, meta["duration_ms"])
+        if seg.start_ms != cursor or seg.end_ms > end_ms:
+            raise ValueError("Layout segments must cover the clip without gaps or overlaps")
+        if seg.layout not in LAYOUTS:
+            raise ValueError("Layout segments must specify a concrete layout")
+        resolve_layout(seg.layout, seg.facecam_roi)
+        validate_roi(seg.facecam_roi, vw, vh, "Facecam ROI")
+        game = validate_roi(seg.gameplay_roi, vw, vh, "Gameplay ROI")
+        if (type(seg.camera_fraction) not in (float, int) or not .25 <= seg.camera_fraction <= .35
+                or seg.camera_slot not in {"top", "bottom", "left", "right"}):
+            raise ValueError("Camera slot and size are invalid")
+        if seg.gameplay_path:
+            if game is None or len(seg.gameplay_path) > 200:
+                raise ValueError("Animated gameplay needs a crop and at most 200 keyframes per segment")
+            last = seg.start_ms - 1
+            for point in seg.gameplay_path:
+                if not isinstance(point, (list, tuple)) or len(point) != 3 or any(type(v) is not int for v in point):
+                    raise ValueError("Gameplay keyframes require integer time, x and y")
+                time_ms, x, y = point
+                if not last < time_ms <= seg.end_ms:
+                    raise ValueError("Gameplay keyframes must be ordered inside their segment")
+                validate_roi((x, y, game[2], game[3]), vw, vh, "Gameplay keyframe")
+                last = time_ms
+        cursor = seg.end_ms
+    if cursor != end_ms:
+        raise ValueError("Layout segments must end with the clip")
+
+    duration = _seconds(end_ms - start_ms)
+    source = source.resolve()
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if source == output or (output.exists() and source.samefile(output)):
+        raise ValueError("Output must be separate from the source")
+
+    # Normalize non-square pixels after cropping, so source-coordinate ROIs work.
+    # For temporal cuts the frame grid is shared by every branch. Audio is never concatenated.
+    if len(segments) == 1:
+        graph = _composite("[0:v:0]", "[stage]", segments[0], width, height, "a", sar)
+    else:
+        try:
+            rate = Fraction(video["avg_frame_rate"])
+            if not 1 <= rate <= 120:
+                raise ValueError
+        except (ValueError, ZeroDivisionError, KeyError):
+            rate = Fraction(30)
+        if any((seg.end_ms - seg.start_ms) * rate < 1000 for seg in segments):
+            raise ValueError("Temporal layout segment is shorter than one source frame")
+        inputs = "".join(f"[input{i}]" for i in range(len(segments)))
+        filters = [f"[0:v:0]fps={rate}:start_time=0,split={len(segments)}{inputs}"]
+        for i, seg in enumerate(segments):
+            begin = _seconds(seg.start_ms - start_ms)
+            finish = _seconds(seg.end_ms - start_ms)
+            # An end trim on each split branch lets concat finish the branch at the cut.
+            filters.append(f"[input{i}]trim=start={begin}:end={finish},setpts=PTS-STARTPTS[part{i}]")
+            filters.append(_composite(f"[part{i}]", f"[view{i}]", seg, width, height, f"x{i}", sar))
+        views = "".join(f"[view{i}]" for i in range(len(segments)))
+        filters.append(f"{views}concat=n={len(segments)}:v=1:a=0[stage]")
+        graph = ";".join(filters)
+
+    with tempfile.TemporaryDirectory(prefix=".render-", dir=output.parent) as scratch, staged_file(output) as staged:
+        scratch = Path(scratch)
+        stage = "[stage]"
+        if hook:
+            opening = segments[0]
+            seam = (opening.camera_fraction if opening.layout == "facecam-gameplay"
+                    and opening.camera_slot == "top" else .0)
+            y = round(height * (seam + .105 if seam else .13))
+            (scratch / "hook.ass").write_text(_hook_ass(hook, width, height, y, end_ms - start_ms), encoding="utf-8")
+            graph += f";{stage}ass=filename=hook.ass[hook]"
+            stage = "[hook]"
+        if captions_path is not None:
+            if not captions_path.is_file():
+                raise ValueError(f"Caption file does not exist: {captions_path}")
+            if captions_path.stat().st_size:
+                shutil.copyfile(captions_path, scratch / "captions.srt")
+                alignment = {"lower": 2, "middle": 5, "upper": 8}[caption_position]
+                if shorts:
+                    if caption_position == "lower" and any(s.camera_slot == "bottom" for s in segments):
+                        alignment = 5
+                    style = (f"FontName=Arial,Bold=-1,FontSize=11,Alignment={alignment},"
+                             "MarginV=58,MarginL=23,MarginR=29,Outline=1.6,Shadow=.5")
+                else:
+                    style = (f"FontName=Arial,FontSize=11,Alignment={alignment},"
+                             "MarginV=30,MarginL=22,MarginR=24,Outline=1.4,Shadow=0")
+                graph += f";{stage}subtitles=filename=captions.srt:force_style='{style}'[out]"
+            else:
+                graph += f";{stage}null[out]"
+        else:
+            graph += f";{stage}null[out]"
+
+        audio_filter = SOURCE_CLOCK_AUDIO_FILTER + f",apad,atrim=duration={duration}"
+        if audio_profile == "balanced":
+            audio_filter += ",loudnorm=I=-16:TP=-1.5:LRA=11"
+        graph_args = ["-filter_complex", graph]
+        if len(graph) > 9000:
+            (scratch / "video-filters.txt").write_text(graph, encoding="ascii")
+            graph_args = ["-filter_complex_script", "video-filters.txt"]
+        encoding = (["-b:v", "12M", "-maxrate", "18M", "-bufsize", "24M"]
+                    if shorts and width >= 1080 else ["-crf", "20" if width >= 1080 else "23"])
+        args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error", "-xerror",
+                "-ss", _seconds(start_ms), "-i", str(source), "-t", duration,
+                "-filter_complex_threads", "1", *graph_args,
+                "-map", "[out]", "-map", f"0:a:{audio_stream}", "-af", audio_filter,
+                "-c:v", "libx264", "-preset", "veryfast", *encoding,
+                "-pix_fmt", "yuv420p", "-fps_mode", "vfr", "-c:a", "aac", "-b:a", "160k",
+                "-ar", "48000", "-ac", "2", "-disposition:a:0", "default",
+                "-movflags", "+faststart", str(staged)]
+        timeout = max(60, (end_ms - start_ms) / 1000 * 12)
+        exec_checked(args, cwd=scratch, timeout=timeout)
+        rendered = probe(staged)
+        outvideo = next((s for s in rendered["streams"] if s.get("codec_type") == "video"), {})
+        if (outvideo.get("codec_name"), outvideo.get("width"), outvideo.get("height")) != ("h264", width, height):
+            raise RuntimeError("Rendered video did not pass H.264 portrait verification")
+        if not any(s.get("codec_type") == "audio" and s.get("codec_name") == "aac" for s in rendered["streams"]):
+            raise RuntimeError("Rendered clip is missing AAC audio")
+        expected = end_ms - start_ms
+        if abs(rendered["duration_ms"] - expected) > 150:
+            raise RuntimeError("Rendered clip has unexpected duration; verify source timestamps")
+        if outvideo.get("duration") not in (None, "N/A"):
+            if abs(float(outvideo["duration"]) * 1000 - expected) > 150:
+                raise RuntimeError("Rendered video ended early or ran past the clip")
+        exec_checked(["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-xerror",
+                      "-i", str(staged), "-f", "null", "-"], timeout=timeout)
+        staged.replace(output)

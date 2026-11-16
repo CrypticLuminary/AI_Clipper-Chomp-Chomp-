@@ -1,18 +1,20 @@
 # Stage 1 / Section 2 — Media and export acceptance
 
+See the [current Stage 1 workflow](stage1-quality.md) for grouped temporal layouts, edit revisions, and review approval.
+
 This section tests **how a selected interval is rendered**, independently of how highlight candidates are chosen.
 
 ## Production formats
 
-- **Facecam + gameplay.** The source facecam crop fills the top 35%. Gameplay fills the bottom 65%.
+- **Facecam + gameplay.** The webcam region fits in the top 35%. The lower panel preserves the selected gameplay region by default.
 - **Gameplay only.** The portrait fills the frame with a center crop or the supplied `--gameplay-roi`.
 - **Fit.** The full source is visible over a blurred background. An explicit `--gameplay-roi` limits the view to that region.
-- `letterbox` uses black padding for troubleshooting and comparisons. All formats render 540×960 H.264/AAC review previews.
+- `letterbox` uses padding for troubleshooting and comparisons. Choose a 540×960 review preview or a 1080×1920 final profile.
 
 ## Controls
 
 - `--start`, `--end` (source seconds): Direct manual preview, no heuristic ranker. Both are required together, and `--render` is required.
-- `--layout`: `auto`, `auto-facecam`, `facecam-gameplay`, `gameplay-only`, `fit`, or `letterbox`. `auto` uses a split when you provide a facecam rectangle and gameplay-only otherwise.
+- `--layout`: `auto`, `auto-facecam`, `facecam-gameplay`, `gameplay-only`, `fit`, or `letterbox`. `auto` uses a split when you provide a facecam rectangle and fits the full source otherwise.
 - `--facecam-roi`, `--gameplay-roi`: Source pixel coordinates `x,y,w,h`. Invalid/out-of-frame ROIs are rejected.
 - `--audio-stream N`: Select the Nth source audio track; preserve correct channel and AAC output.
 - `--transcript` in manual mode: Optional clip-relative SRT from source timestamped segments.
@@ -26,7 +28,7 @@ python -m pip install -e ".[facecam]"
 chomp --input "authorized recording.mp4" --rights-ref "your-authorization" --acknowledge-permission --layout auto-facecam --render
 ```
 
-`auto-facecam` samples up to 12 frames inside each selected clip or manual preview range. A recurring small face near a frame edge can trigger a fixed padded crop. The renderer fits that crop into the top panel so its edges stay visible. Brief appearances, static images, similarly supported alternatives and major moves during a clip fall back to `fit`. `--facecam-roi` overrides the detector. The edit spec records the layout, rectangle and sampling evidence so a reviewer can correct an unsuitable crop. The detected rectangle estimates framing around a face. Confirm it shows the intended streamer, and check captions and gameplay before approving an output.
+`auto-facecam` samples selected ranges at roughly 375 ms intervals. Stable small-camera spans can use a split and uncertain spans fall back to full-frame fit. The detector looks for persistent container edges and flags padded estimates for inspection. A supplied ROI overrides the detector. Inspect the selected gameplay and webcam through each layout transition before approval.
 
 ## Regression gates
 
@@ -38,4 +40,4 @@ chomp --input "authorized recording.mp4" --rights-ref "your-authorization" --ack
 
 ## Not yet delivered
 
-- Scene-by-scene face tracking, activity-aware gameplay cropping, intelligent clip start/payoff recognition, verified streamer identity, reliable speaker separation, remote VOD acquisition and measured clip-quality prediction are outside Stage 1.
+- Activity-aware gameplay tracking and comparative real-footage measurements of automatic layouts remain follow-up work. Remote acquisition and live capture belong to later stages.

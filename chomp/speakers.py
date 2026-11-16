@@ -15,10 +15,19 @@ from .models import SpeakerTurn, TranscriptSegment
 from .signals import _secs_to_ms
 
 
-def read_speaker_turns(path: Path | None, duration_ms: int) -> list[SpeakerTurn]:
+def read_speaker_turns(path: Path | None, duration_ms: int, *, source_id: str | None = None,
+                       audio_stream: int | None = None) -> list[SpeakerTurn]:
     if path is None:
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
+    provenance = payload.get("source_clock") if isinstance(payload, dict) else None
+    if provenance is not None:
+        if not isinstance(provenance, dict) or provenance.get("duration_ms") != duration_ms:
+            raise ValueError("Speaker turns were generated for a different source duration")
+        if source_id is not None and provenance.get("source_id") != source_id:
+            raise ValueError("Speaker turns belong to a different recording")
+        if audio_stream is not None and provenance.get("audio_stream") != audio_stream:
+            raise ValueError("Speaker turns were generated from a different audio track")
     rows = payload.get("turns", []) if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
         raise ValueError("Speaker turn file must be a list or {turns: [...]} object")
@@ -27,7 +36,7 @@ def read_speaker_turns(path: Path | None, duration_ms: int) -> list[SpeakerTurn]
         if not isinstance(item, dict):
             raise ValueError("Every speaker turn must be an object")
         if "start_ms" in item:
-            start, end = int(item["start_ms"]), int(item["end_ms"])
+            start, end = item["start_ms"], item["end_ms"]
         else:
             start, end = _secs_to_ms(item["start"]), _secs_to_ms(item["end"])
         speaker = item.get("speaker_id", item.get("speaker"))
@@ -50,14 +59,23 @@ def attribute_segments(segments: list[TranscriptSegment], turns: list[SpeakerTur
         if s.speaker_id is not None:
             result.append(s)
             continue
-        coverage: dict[str, int] = defaultdict(int)
+        intervals: dict[str, list[tuple[int, int]]] = defaultdict(list)
         for t in turns:
-            common = max(0, min(s.end_ms,t.end_ms)-max(s.start_ms,t.start_ms))
-            if common:
-                coverage[t.speaker_id] += common
+            a, b = max(s.start_ms, t.start_ms), min(s.end_ms, t.end_ms)
+            if a < b:
+                intervals[t.speaker_id].append((a, b))
+        coverage: dict[str, int] = {}
+        for speaker, spans in intervals.items():
+            covered = 0
+            last_end = s.start_ms
+            for a, b in sorted(spans):
+                covered += max(0, b - max(a, last_end))
+                last_end = max(b, last_end)
+            coverage[speaker] = covered
         ranked = sorted(coverage.items(), key=lambda x: x[1], reverse=True)
         span = s.end_ms-s.start_ms
-        if not ranked or ranked[0][1]/span < .65 or (len(ranked)>1 and (ranked[0][1]-ranked[1][1])/span < .45):
+        if (not ranked or ranked[0][0] == "SPEAKER_UNKNOWN" or ranked[0][1]/span < .65
+                or (len(ranked)>1 and (ranked[0][1]-ranked[1][1])/span < .45)):
             result.append(s)
         else:
             result.append(replace(s, speaker_id=ranked[0][0]))

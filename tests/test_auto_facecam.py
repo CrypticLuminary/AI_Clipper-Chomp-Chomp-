@@ -66,7 +66,8 @@ def test_manual_facecam_roi_takes_precedence(monkeypatch):
 
     monkeypatch.setattr("chomp.framing._sample_facecam", unexpected_sample)
     plan = plan_framing(Path("unused.mp4"), 10, 2000, "auto-facecam", RIGHT_FACE)
-    assert plan == FramingPlan("facecam-gameplay", RIGHT_FACE, {"method": "supplied_roi"})
+    assert plan.layout == "facecam-gameplay" and plan.facecam_roi == RIGHT_FACE
+    assert plan.detection == {"method": "supplied_roi"} and plan.warnings
 
 
 def make_media(tmp_path):

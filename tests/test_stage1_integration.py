@@ -212,14 +212,18 @@ def test_audio_only_boundaries_use_the_selected_audio_track(tmp_path):
 @needs_ffmpeg
 def test_review_denominators_and_source_clock_comparison(tmp_path):
     source = vod(tmp_path / "four moments.mp4", duration=120)
-    speech = ("Did you see the setup for this turn? Can you see how the result follows from it? "
-              "The group checked the map and planned what to do before the countdown. "
-              "Then the player changed course when the gate opened unexpectedly! That was the surprise.")
+    speeches = [
+        "Did you see that marker? The group checked the map and planned what to do before the countdown. They found the right route!",
+        "Looking for a place to land? Turn your glider toward the highest ridge, then try this angle over the bridge. Easy!",
+        "Remember our first match? I dropped all the gear because I thought the merchant needed it. I learned that lesson quickly!",
+        "How do we fix the engine? Find the spare part in the repair room and wait for the green light. That solves the puzzle!",
+    ]
     transcript = write_json(tmp_path / "separate moments.json", {"segments": [
-        {"start_ms": sec * 1000, "end_ms": (sec + 8) * 1000, "text": speech} for sec in (7, 37, 67, 97)
+        {"start_ms": sec * 1000, "end_ms": (sec + 8) * 1000, "text": speech}
+        for sec, speech in zip((7, 37, 67, 97), speeches)
     ]})
     root = tmp_path / "integration review"
-    first = process(source, root, rights_ref="fixture", transcript_path=transcript)
+    first = process(source, root, rights_ref="fixture", transcript_path=transcript, min_score=0)
     assert first["candidate_count"] == 4 and first["selected_for_review"] == 3
     manifest_path = root / first["job_id"] / "review_queue.json"
     manifest = read_manifest(manifest_path)
@@ -240,7 +244,7 @@ def test_review_denominators_and_source_clock_comparison(tmp_path):
     assert report["precision_at_3"]["value"] is None
     assert report["interesting_rate"]["denominator"] == 1
 
-    second = process(source, root, rights_ref="fixture", transcript_path=transcript, layout="letterbox")
+    second = process(source, root, rights_ref="fixture", transcript_path=transcript, layout="letterbox", min_score=0)
     other_manifest = read_manifest(root / second["job_id"] / "review_queue.json")
     new_labels = tmp_path / "new fixture labels.json"
     make_template(other_manifest, new_labels)
@@ -311,7 +315,8 @@ def test_refined_audio_candidates_rank_before_duplicate_suppression():
         assert candidate.anchor_ms == before and decision.method == "signal_padding_fallback"
         heuristic_rank(candidate)
     assert select([duplicate, winner], min_score=0) == [winner]
-    assert select([duplicate, winner], min_score=45) == []
+    assert select([duplicate, winner], min_score=45) == [winner]
+    assert select([duplicate], min_score=45) == []
     duplicate.score = float("nan")
     with pytest.raises(ValueError, match="score"):
         select([duplicate, winner], min_score=0)

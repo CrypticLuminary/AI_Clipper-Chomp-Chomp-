@@ -429,7 +429,7 @@ def _diarize_sherpa(
             num_clusters=config.num_speakers if config.num_speakers else -1,
             threshold=0.5,
         ),
-        min_duration_on=0.3,
+        min_duration_on=config.min_segment_ms / 1000,
         min_duration_off=0.5,
     )
 
@@ -456,11 +456,10 @@ def _diarize_sherpa(
         start_ms = int(seg.start * 1000)
         end_ms = int(seg.end * 1000)
         speaker_id = f"SPEAKER_{seg.speaker:02d}"
-        speaker_set.add(speaker_id)
-
         start_ms = max(0, start_ms)
         end_ms = min(duration_ms, end_ms)
         if end_ms > start_ms:
+            speaker_set.add(speaker_id)
             turns.append(SpeakerTurn(start_ms, end_ms, speaker_id))
 
     turns = _merge_consecutive_turns(turns)
@@ -578,7 +577,8 @@ def _diarize_resemblyzer(
         method = "resemblyzer_auto"
 
     # Build turns
-    speaker_labels = {label: f"SPEAKER_{label:02d}" for label in sorted(set(labels))}
+    speaker_labels = {label: f"SPEAKER_{label:02d}" if label >= 0 else "SPEAKER_UNKNOWN"
+                      for label in set(labels)}
     labeled_map: dict[int, str] = {}
     for emb_idx, label in enumerate(labels):
         labeled_map[segment_indices[emb_idx]] = speaker_labels[label]
@@ -601,7 +601,7 @@ def _diarize_resemblyzer(
 
     return DiarizationResult(
         turns=_validate_turns(turns, duration_ms),
-        num_speakers_detected=num_speakers if isinstance(num_speakers, int) else len(set(labels)),
+        num_speakers_detected=len({turn.speaker_id for turn in turns if turn.speaker_id != "SPEAKER_UNKNOWN"}),
         method=method, warnings=warnings,
         metadata={
             "backend": "resemblyzer",
@@ -656,18 +656,26 @@ def _auto_detect_speakers(
     config: DiarizationConfig,
     warnings: list[str],
 ) -> tuple[np.ndarray, int]:
-    """Try multiple speaker counts; pick best silhouette score."""
+    """Keep cohesive single voices together and abstain on ambiguous clusters."""
     n = len(embeddings)
     max_k = min(config.max_speakers, n - 1)
-    if max_k < 2:
+    if not n:
+        return np.full(n, -1, dtype=int), 0
+
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    unit = embeddings / np.maximum(norms, 1e-8)
+    center = unit.mean(axis=0)
+    coherence = unit @ (center / max(np.linalg.norm(center), 1e-8))
+    if float(np.quantile(coherence, .1)) >= .86:
         return np.zeros(n, dtype=int), 1
+    if max_k < 2:
+        return np.full(n, -1, dtype=int), 0
 
     try:
         from sklearn.metrics import silhouette_score  # type: ignore[import-untyped]
     except ImportError:
-        warnings.append("scikit-learn silhouette_score unavailable; defaulting to 2 speakers")
-        k = min(2, len(embeddings))
-        return _cluster_embeddings(embeddings, k, warnings), k
+        warnings.append("Clustering confidence unavailable; leaving speakers unknown")
+        return np.full(n, -1, dtype=int), 0
 
     best_score = -1.0
     best_labels = np.zeros(n, dtype=int)
@@ -691,6 +699,7 @@ def _auto_detect_speakers(
             f"Best silhouette ({best_score:.3f}) below threshold "
             f"({config.confidence_threshold}); results may be unreliable"
         )
+        return np.full(n, -1, dtype=int), 0
     return best_labels, best_k
 
 
@@ -714,7 +723,7 @@ def _nearest_speaker(
         if dist < best_dist:
             best_dist = dist
             best_speaker = labeled_map[idx]
-    return best_speaker
+    return best_speaker if best_dist <= 1500 else "SPEAKER_UNKNOWN"
 
 
 def _merge_consecutive_turns(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
@@ -725,7 +734,7 @@ def _merge_consecutive_turns(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
     for turn in turns[1:]:
         prev = merged[-1]
         if turn.speaker_id == prev.speaker_id and turn.start_ms - prev.end_ms <= 500:
-            merged[-1] = SpeakerTurn(prev.start_ms, turn.end_ms, prev.speaker_id)
+            merged[-1] = SpeakerTurn(prev.start_ms, max(prev.end_ms, turn.end_ms), prev.speaker_id)
         else:
             merged.append(turn)
     return merged

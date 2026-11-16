@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from chomp.captions import _chunks, make_srt
+from chomp.captions import _chunks, build_captions, make_srt
 from chomp.models import TranscriptSegment
 
 
@@ -31,7 +31,7 @@ def parse_srt(text: str):
             return ((int(hours) * 60 + int(mins)) * 60 + int(whole)) * 1000 + int(frac)
         left, right = map(time, lines[1].split(' --> '))
         assert right > left
-        assert len(lines[2:]) <= 2
+        assert lines[2:]
         assert all(0 < len(line) <= 28 for line in lines[2:])
         cues.append((left, right, '\n'.join(lines[2:])))
     for previous, current in zip(cues, cues[1:]):
@@ -40,9 +40,10 @@ def parse_srt(text: str):
 
 
 def generate(parts, start, end, duration):
-    output, count = make_srt(parts, start, end, duration)
-    parsed = parse_srt(output)
-    assert count == len(parsed)
+    result = build_captions(parts, start, end, duration)
+    parsed = parse_srt(result.text)
+    assert result.count == len(parsed)
+    assert all(len(text.splitlines()) <= 2 for _, _, text in parsed)
     assert all(0 <= a < b <= end - start for a, b, _ in parsed)
     return parsed
 
@@ -68,7 +69,9 @@ def test_short_reaction_and_micro_utterance_no_extension_into_silence():
     assert cues == [(2000, 3100, 'No way!')]
     micro = generate([segment(1000, 1300, 'Go!')], 0, 5000, 5000)
     assert micro == [(1000, 1300, 'Go!')]
-    assert generate([segment(1000, 1170, 'flicker')], 0, 5000, 5000) == []
+    short = [segment(1000, 1170, 'Go!')]
+    assert generate(short, 0, 5000, 5000) == [(1000, 1170, 'Go!')]
+    assert any("brief" in warning for warning in build_captions(short, 0, 5000, 5000).warnings)
 
 
 def test_long_utterance_two_lines_and_no_flash():
@@ -82,13 +85,12 @@ def test_long_utterance_two_lines_and_no_flash():
     assert cues[0][0] == 0 and cues[-1][1] == 12000
 
 
-def test_fast_speech_stays_readable_by_transparent_abbreviation():
+def test_fast_speech_retains_every_word_and_flags_readability():
     text = ' '.join('quickly' for _ in range(50))
-    cues = generate([segment(1000, 2500, text)], 0, 8000, 8000)
-    assert 1 <= len(cues) <= 2
-    assert all(b - a >= 700 for a, b, _ in cues)
-    assert all(len(t.replace('\n', ' ')) / ((b-a)/1000) <= 25 for a,b,t in cues)
-    assert cues[-1][2].endswith('…')
+    parts = [segment(1000, 2500, text)]
+    cues = generate(parts, 0, 8000, 8000)
+    assert ' '.join(' '.join(t.split()) for _, _, t in cues) == text
+    assert any("reading-speed" in w for w in build_captions(parts, 0, 8000, 8000).warnings)
     assert cues[-1][1] <= 2500
 
 
@@ -107,24 +109,23 @@ def test_silence_gap_remains_blank_and_source_end_restricted():
     assert cues[1][1] == 10000
 
 
-def test_overlap_prefers_next_speaker_without_stacked_cues():
+def test_overlap_preserves_every_speaker_on_a_serial_timeline():
     parts = [segment(2000, 8000, 'The first person is speaking for some time.', 'A'),
              segment(5000, 10000, 'The second person has an interruption here.', 'B'),
              segment(7000, 11000, 'A final important response occurs.', 'C')]
     cues = generate(parts, 0, 12000, 12000)
     assert len(cues) >= 3
-    assert any(a < 5000 and b <= 5000 for a,b,_ in cues)
-    assert any(5000 <= a < 7000 and b <= 7000 for a,b,_ in cues)
-    assert any(a >= 7000 for a,_,_ in cues)
-    assert all('‹' not in t for _,_,t in cues)
+    combined = ' '.join(' '.join(t.split()) for _, _, t in cues)
+    assert "for some time." in combined and "interruption here." in combined and "response occurs." in combined
+    assert any("Overlapping" in w for w in build_captions(parts, 0, 12000, 12000).warnings)
 
 
-def test_same_onset_deterministic_no_double_caption():
+def test_same_onset_retains_both_speakers():
     parts = [segment(1000, 5000, 'first speaker', 'S1'),
              segment(1000, 6000, 'second speaker', 'S2')]
     cues = generate(parts, 0, 7000, 7000)
-    assert len(cues) == 1 and 'first speaker' in cues[0][2]
-    assert 'second' not in cues[0][2]
+    assert [text for _, _, text in cues] == ["first speaker", "second speaker"]
+    assert cues[0][0] == 1000 and cues[-1][1] == 6000
     assert make_srt(parts, 0, 7000, 7000) == make_srt(parts,0,7000,7000)
 
 

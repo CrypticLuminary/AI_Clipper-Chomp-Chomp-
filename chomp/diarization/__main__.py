@@ -155,7 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         "identity_map": str(id_path),
         "warnings": result.warnings,
         "suggested_pipeline_command": generate_pipeline_command(
-            args.media, turns_path
+            args.media.resolve(), turns_path,
+            extra_args=["--transcribe", "--audio-stream", str(args.audio_stream)],
         ),
     }, indent=2, ensure_ascii=False))
 

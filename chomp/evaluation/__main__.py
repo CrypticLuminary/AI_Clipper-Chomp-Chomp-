@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import sys
 
+from .benchmark import benchmark, create_event_template
 from .core import (
     ClipLedgerError, compare, evaluate, make_template, read_annotations,
     read_manifest, write_json,
@@ -25,7 +27,7 @@ def _paths(parser: argparse.ArgumentParser, *, prefix: str = "") -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m chomp.evaluation",
-        description="Human review templates and selected-clip quality reporting (not recall).",
+        description="Human clip reviews and source-event evaluation.",
     )
     cmds = parser.add_subparsers(dest="command", required=True)
     make = cmds.add_parser("template", help="Create once; never overwrite existing labels")
@@ -51,6 +53,16 @@ def main(argv: list[str] | None = None) -> int:
     _paths(compare_cmd, prefix="old-")
     _paths(compare_cmd, prefix="new-")
     compare_cmd.add_argument("--out", help="Output JSON comparison; otherwise stdout")
+
+    events = cmds.add_parser("events-template", help="Create a blank source-event annotation file")
+    events.add_argument("--candidates", type=Path, required=True)
+    events.add_argument("--reviewer", required=True)
+    events.add_argument("--out", type=Path, required=True)
+    bench = cmds.add_parser("benchmark", help="Compare proposals with independently annotated source events")
+    bench.add_argument("--candidates", type=Path, required=True)
+    bench.add_argument("--events", type=Path, required=True)
+    bench.add_argument("--manifest", type=Path)
+    bench.add_argument("--reviews", type=Path, action="append", default=[])
 
     args = parser.parse_args(argv)
     try:
@@ -104,8 +116,15 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(output)
             else:
                 print(f"ClipLedger comparison written to {args.out}")
+        elif args.command == "events-template":
+            create_event_template(args.candidates, args.out, reviewer=args.reviewer)
+            print(f"Source-event template written to {args.out}")
+        elif args.command == "benchmark":
+            result = benchmark(args.events, args.candidates, manifest_path=args.manifest,
+                               reviews=tuple(args.reviews))
+            print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
         return 0
-    except (ClipLedgerError, OSError) as exc:
+    except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.error(str(exc))
         return 2
 

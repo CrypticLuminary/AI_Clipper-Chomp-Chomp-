@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..artifacts import write_json
+
 
 @dataclass
 class SpeakerIdentityMap:
@@ -72,12 +74,29 @@ class SpeakerIdentityMap:
 
     @classmethod
     def from_json_dict(cls, data: dict) -> SpeakerIdentityMap:
+        if not isinstance(data, dict):
+            raise ValueError("Speaker identity map must be an object")
+        confirmed = data.get("confirmed", False)
+        mappings = data.get("mappings", {})
+        main_id = data.get("main_speaker_id")
+        method = data.get("confirmation_method", "unconfirmed")
+        notes = data.get("notes", "")
+        if type(confirmed) is not bool:
+            raise ValueError("Speaker identity confirmation must be true or false")
+        if (not isinstance(mappings, dict) or any(
+            not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip()
+            for key, value in mappings.items()
+        )):
+            raise ValueError("Speaker identity mappings must contain nonempty strings")
+        if main_id is not None and (not isinstance(main_id, str) or not main_id.strip()):
+            raise ValueError("main_speaker_id must be an ID or null")
+        if confirmed and (not main_id or main_id not in mappings):
+            raise ValueError("A confirmed identity needs a matching main_speaker_id")
+        if not isinstance(method, str) or not isinstance(notes, str):
+            raise ValueError("Speaker identity notes and confirmation method must be text")
         return cls(
-            mappings=data.get("mappings", {}),
-            main_speaker_id=data.get("main_speaker_id"),
-            confirmed=data.get("confirmed", False),
-            confirmation_method=data.get("confirmation_method", "unconfirmed"),
-            notes=data.get("notes", ""),
+            mappings=mappings, main_speaker_id=main_id, confirmed=confirmed,
+            confirmation_method=method, notes=notes,
         )
 
     def save(self, path: Path) -> None:
@@ -91,10 +110,8 @@ class SpeakerIdentityMap:
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(self.to_json_dict(), indent=2, ensure_ascii=False)
         try:
-            with open(path, "x", encoding="utf-8") as f:
-                f.write(content)
+            write_json(path, self.to_json_dict(), exclusive=True)
         except FileExistsError as exc:
             raise FileExistsError(
                 f"Speaker identity map already exists at '{path}'. "

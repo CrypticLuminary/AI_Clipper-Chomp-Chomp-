@@ -1,5 +1,7 @@
 # Stage 1 / Section 3 — Speaker Diarization and Identification
 
+The original backend comparison below is historical. Use the [current Stage 1 workflow](stage1-quality.md) for selected-track and artifact contracts. Benchmark each exact model on the intended VOD before relying on its labels, and record the separate license for each downloaded checkpoint.
+
 **Status:** Implemented optional diarization subsystem with dual backends (primary: `sherpa-onnx`, fallback: `resemblyzer`), conservative transcript attribution, explicit streamer identity mapping, and comprehensive mocked-model integration tests.  
 **Date:** 2026-11-14  
 **Primary target:** Windows 10/11 x64, Python 3.11–3.14, CPU-first local execution.  
@@ -40,7 +42,7 @@ We evaluated seven approaches for local speaker diarization on Windows targeting
 
 ### Technical Decision
 - **Primary Backend: `sherpa-onnx`**
-  - Permissive **Apache 2.0** license throughout.
+  - Apache 2.0 library source. Check individual checkpoint terms and attribution, including the [upstream segmentation model license](https://huggingface.co/pyannote/segmentation-3.0/blob/main/LICENSE).
   - Native Windows x64 support via ONNX Runtime without requiring PyTorch or CUDA toolkits.
   - Compact models (~34 MB total) for segmentation (PyAnnote-based ONNX port) and speaker embedding (CAM++).
   - No HuggingFace accounts, tokens, or gated terms of service required.
@@ -278,7 +280,7 @@ tests\test_pipeline.py .........                                         [100%]
 
 ## 10. Known Limitations & Failures
 
-1. **Diarization Error Rate (DER) in Chaotic Gaming:** In high-intensity competitive gaming with simultaneous shouting, game gunshots, and loud electronic music, expect 30–50% DER compared to 10–15% in clean interview recordings.
+1. **Diarization Error Rate:** Measure separately on clean dialogue and on overlapping game/voice mixes. The mocked backend tests establish interface behavior.
 2. **Multi-Track Advantage:** Diarization is an acoustic estimate. Creators using OBS multi-track recording (Track 1 = Master, Track 2 = Mic, Track 3 = Discord) should prefer `--audio-stream` isolation over single-track acoustic diarization whenever possible.
 3. **No Automatic Streamer Inference:** Acoustic clustering cannot know which voice belongs to the streamer without facecam correlation or human confirmation.
-4. **Quantization & CPU Latency:** On older CPUs without AVX2 instructions, embedding extraction for long 4-hour VODs can take 15–30 minutes. Run diarization on candidate clip intervals or downsampled audio when processing long recordings.
+4. **CPU and memory:** Optional diarization decodes 16 kHz audio and its costs depend on recording length and backend. Record peak memory and wall time on the intended machine.

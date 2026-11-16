@@ -15,12 +15,14 @@ a full diarization workflow.
 """
 from __future__ import annotations
 
-import json
+import os
+import shlex
 import logging
 import tempfile
 from pathlib import Path
 
-from ..media import probe
+from ..artifacts import artifact_lock, promote_new, source_identity, write_json
+from ..media import check_audio_track, probe
 from ..models import SpeakerTurn, TranscriptSegment
 from ..speakers import attribute_segments, read_speaker_turns
 from .core import (
@@ -65,84 +67,67 @@ def diarize_and_export(
     Raises:
         RuntimeError: If the backend is unavailable or FFmpeg fails.
     """
-    if not check_backend_available():
-        raise RuntimeError(
-            f"Diarization backend unavailable: {BACKEND_UNAVAILABLE_REASON}"
-        )
+    if not check_backend_available(config):
+        raise RuntimeError(f"Diarization backend unavailable: {BACKEND_UNAVAILABLE_REASON}")
 
+    media_path = media_path.resolve()
     output_dir = output_dir.resolve()
     identity_path = output_dir / "speaker_identity_map.json"
     turns_path = output_dir / "speaker_turns.json"
 
-    # Fail closed before any expensive audio processing if either output file exists
-    conflicts: list[Path] = []
-    if identity_path.exists():
-        conflicts.append(identity_path)
-    if turns_path.exists():
-        conflicts.append(turns_path)
+    def check_conflicts() -> None:
+        conflicts = [path for path in (identity_path, turns_path) if path.exists()]
+        if conflicts:
+            names = ", ".join(f"'{path}'" for path in conflicts)
+            raise FileExistsError(
+                f"Diarization output already exists at {names}. Choose a different output directory."
+            )
 
-    if conflicts:
-        conflict_names = ", ".join(f"'{p}'" for p in conflicts)
-        raise FileExistsError(
-            f"Diarization output file already exists at {conflict_names}. "
-            "Cannot overwrite existing diarization output. "
-            "Please choose a different output directory for new diarization runs."
-        )
+    with artifact_lock(output_dir.parent / f".{output_dir.name}.diarization.lock", timeout=5):
+        check_conflicts()
+        if duration_ms is None:
+            meta = probe(media_path)
+            check_audio_track(meta, audio_stream)
+            duration_ms = meta["duration_ms"]
+        if type(duration_ms) is not int or duration_ms <= 0:
+            raise ValueError("Media duration must be a positive integer in milliseconds")
+        if type(audio_stream) is not int or audio_stream < 0:
+            raise ValueError("Audio stream must be a nonnegative integer")
+        recording = source_identity(media_path)
 
-    # Use the same published media duration as --speaker-turns on re-import.
-    # Decoded AAC can contain frame padding beyond the container duration.
-    if duration_ms is None:
-        duration_ms = probe(media_path)["duration_ms"]
-    if duration_ms <= 0:
-        raise ValueError("Media has zero or negative duration")
+        with tempfile.TemporaryDirectory(prefix=".diarize-", dir=output_dir.parent,
+                                         ignore_cleanup_errors=True) as temp:
+            scratch = Path(temp)
+            wav = scratch / "input.wav"
+            logger.info("Converting %s to WAV for diarization", media_path)
+            convert_to_wav(media_path, wav, audio_stream=audio_stream)
+            result = diarize_audio(wav, duration_ms, config)
+            wav.unlink(missing_ok=True)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Convert to WAV
-    wav_path = output_dir / "diarization_input.wav"
-    try:
-        logger.info("Converting %s to WAV for diarization", media_path)
-        convert_to_wav(media_path, wav_path, audio_stream=audio_stream)
-
-        # Run diarization
-        logger.info("Running diarization (duration: %d ms)", duration_ms)
-        result = diarize_audio(wav_path, duration_ms, config)
-        logger.info(
-            "Diarization complete: %d speakers, %d turns, method=%s",
-            result.num_speakers_detected,
-            len(result.turns),
-            result.method,
-        )
-    finally:
-        # Clean up WAV (it can be large)
-        try:
-            wav_path.unlink()
-        except OSError:
-            pass
-
-    # Save identity map template FIRST using exclusive creation to ensure
-    # we never overwrite human work even in concurrent execution races.
-    speaker_ids = sorted({t.speaker_id for t in result.turns})
-    identity_map = build_identity_map(speaker_ids)
-    identity_map.save(identity_path)
-
-    # Export speaker turns JSON using exclusive creation ("x" mode) to prevent
-    # race conditions or overwriting turns data if a turns file appeared after
-    # the preflight check.
-    # Note: If this exclusive write fails after identity_map.save() succeeded,
-    # the existing turns file is preserved byte-for-byte, though an unconfirmed
-    # identity map template was already written to this directory (non-atomic export).
-    turns_content = json.dumps(result.to_json_dict(), indent=2, ensure_ascii=False)
-    try:
-        with open(turns_path, "x", encoding="utf-8") as f:
-            f.write(turns_content)
-    except FileExistsError as exc:
-        raise FileExistsError(
-            f"Speaker turns file already exists at '{turns_path}'. "
-            "Cannot overwrite existing speaker turns data. "
-            "Please choose a different output directory for new diarization runs."
-        ) from exc
-
+            speaker_ids = sorted({turn.speaker_id for turn in result.turns} - {"SPEAKER_UNKNOWN"})
+            identity = build_identity_map(speaker_ids)
+            identity_staged, turns_staged = scratch / identity_path.name, scratch / turns_path.name
+            identity.save(identity_staged)
+            write_json(turns_staged, {**result.to_json_dict(), "source_clock": {
+                "source_id": recording, "duration_ms": duration_ms, "audio_stream": audio_stream,
+            }})
+            check_conflicts()
+            if not output_dir.exists():
+                scratch.rename(output_dir)
+            else:
+                # Existing directories may contain unrelated work. Claim both
+                # names exclusively and undo our own claim if the second fails.
+                original = identity_staged.stat()
+                promote_new(identity_staged, identity_path)
+                try:
+                    promote_new(turns_staged, turns_path)
+                except BaseException:
+                    current = identity_path.stat() if identity_path.exists() else None
+                    if current and (current.st_ino, current.st_size, current.st_mtime_ns) == (
+                        original.st_ino, original.st_size, original.st_mtime_ns
+                    ):
+                        identity_path.unlink()
+                    raise
     return result, turns_path, identity_path
 
 
@@ -178,15 +163,16 @@ def generate_pipeline_command(
     This is a convenience for the user — shows them exactly how to integrate
     the diarization results with the existing pipeline.
     """
-    parts = [
-        "chomp",
-        f'--input "{media_path}"',
-        f'--speaker-turns "{turns_path}"',
-        "--acknowledge-permission",
-        '--rights-ref "YOUR_RIGHTS_REF"',
-    ]
+    def quote(value: object) -> str:
+        text = str(value)
+        if os.name == "nt":
+            return "'" + text.replace("'", "''") + "'"
+        return shlex.quote(text)
+
+    parts = ["chomp", "--input", quote(media_path), "--speaker-turns", quote(turns_path),
+             "--acknowledge-permission", "--rights-ref", quote("YOUR_RIGHTS_REF")]
     if main_speaker_id:
-        parts.append(f"--main-speaker-id {main_speaker_id}")
+        parts.extend(["--main-speaker-id", quote(main_speaker_id)])
     if extra_args:
-        parts.extend(extra_args)
-    return " \\\n  ".join(parts)
+        parts.extend(quote(arg) for arg in extra_args)
+    return " ".join(parts)
