@@ -19,7 +19,15 @@ chomp --input 'D:\AI _Clipper\chomp-chomp\AI_Clipper-Chomp-Chomp-\test3 (speed v
   --person-model 'outputs/cutout-prototype/pphumanseg.onnx'
 ```
 
-Omit `--person-model` for the same source-preserving framing with an `unknown` classification on this interval. Pass your saved transcript with `--transcript` if you want captions. The new automatic plans use planner revision 12. The model's SHA-256 participates in the framing cache key.
+Omit `--person-model` for the same source-preserving framing with an `unknown` classification on this interval. Pass your saved transcript with `--transcript` if you want captions. The automatic plans use planner revision 13. The optional model's SHA-256 and the streamer anchor participate in the framing cache key.
+
+## Reaction videos and multiple faces
+
+A watched video can include several recurring faces in addition to the streamer. When faces persist together and the planner lacks a reliable cutout or streamer anchor, it keeps the full frame for review. A verified panel can still be framed when its face is the only sustained track.
+
+For an exact manual Shorts clip, mark the intended face with `--streamer-anchor MS,X,Y,W,H`. The first value is a source timestamp in milliseconds and the remaining values form a tight face box in source display pixels. The anchor restricts panel and segmentation candidates to one nearby face track. If that track disappears for too long or a proposed crop also contains another sustained face, the planner keeps the complete source. This uses short-term position continuity and local source evidence. Re-identifying a person after an unrelated camera change requires a new observation.
+
+In the six-second local reaction composite, the watched footage contains Speed and Franklin while Emiru is in a separate webcam. With no anchor the exporter uses the stable full-source view. With `--streamer-anchor '1000,1651,701,109,138'` it follows Emiru in all 24 analysis samples and puts her panel in the upper slot.
 
 ## Real footage review
 

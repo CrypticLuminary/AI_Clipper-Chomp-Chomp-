@@ -1,7 +1,44 @@
 """Compare proposed webcam boundaries with the same source coordinates over time."""
 from __future__ import annotations
 
+from collections import Counter
+
 from .media import Rectangle
+from .subject_lock import overlap_fraction
+
+
+def face_tracks(samples) -> list[list[tuple[int, Rectangle]]]:
+    """Associate detections on the source grid while their positions overlap."""
+    tracks: list[list[tuple[int, Rectangle]]] = []
+    for index, sample in enumerate(samples):
+        pairs = []
+        for track_id, track in enumerate(tracks):
+            seen, earlier = track[-1]
+            if index - seen > 3:
+                continue
+            for face_id, face in enumerate(sample.faces):
+                if face_agreement(earlier, face):
+                    pairs.append((track_id, face_id))
+        track_matches = Counter(track_id for track_id, _ in pairs)
+        face_matches = Counter(face_id for _, face_id in pairs)
+        linked = set()
+        for track_id, face_id in pairs:
+            if track_matches[track_id] == face_matches[face_id] == 1:
+                tracks[track_id].append((index, sample.faces[face_id]))
+                linked.add(face_id)
+        tracks.extend([(index, face)] for face_id, face in enumerate(sample.faces) if face_id not in linked)
+    return tracks
+
+
+def face_agreement(a: Rectangle, b: Rectangle) -> bool:
+    return min(overlap_fraction(a, b), overlap_fraction(b, a)) >= .55
+
+
+def competing_faces(tracks: list[list[tuple[int, Rectangle]]]) -> bool:
+    """Ignore brief detections but flag two faces co-visible over several samples."""
+    visible = Counter(index for track in tracks if len(track) >= 4 for index, _ in track)
+    return any(count >= 2 and all(visible[index + offset] >= 2 for offset in (1, 2, 3))
+               for index, count in visible.items())
 
 
 def perimeter_support(frames, box: Rectangle) -> tuple[float | None, ...]:

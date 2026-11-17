@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from statistics import median
 
+from .camera_evidence import face_tracks
 from .media import Rectangle
 from .subject_lock import overlap_fraction
 
@@ -41,29 +42,6 @@ class PersonSegmenter:
         component = np.zeros((height, width), dtype=bool)
         component[top:bottom, left:right] = labels == label
         return component
-
-
-def _face_tracks(samples):
-    """Match by nearby overlapping face boxes, keeping competing tracks separate."""
-    tracks = []
-    for index, sample in enumerate(samples):
-        pairs = []
-        for track_id, track in enumerate(tracks):
-            seen, earlier = track[-1]
-            if index - seen > 3:
-                continue
-            for face_id, face in enumerate(sample.faces):
-                coverage = min(overlap_fraction(earlier, face), overlap_fraction(face, earlier))
-                if coverage >= .55:
-                    pairs.append((coverage, track_id, face_id))
-        used_tracks, used_faces = set(), set()
-        for _, track_id, face_id in sorted(pairs, reverse=True):
-            if track_id not in used_tracks and face_id not in used_faces:
-                tracks[track_id].append((index, sample.faces[face_id]))
-                used_tracks.add(track_id)
-                used_faces.add(face_id)
-        tracks.extend([(index, face)] for i, face in enumerate(sample.faces) if i not in used_faces)
-    return tracks
 
 
 def _surround_moves(a, b, face: Rectangle, earlier_mask, mask) -> bool:
@@ -135,7 +113,7 @@ def _mask_evidence(track, samples, segment, frame_size: tuple[int, int]) -> dict
 
 def classify_cutout(samples, model: Path, frame_size: tuple[int, int]) -> dict | None:
     """Report a cutout only for one well-supported face and mask trajectory."""
-    tracks = [track for track in _face_tracks(samples) if len(track) >= .75 * len(samples)
+    tracks = [track for track in face_tracks(samples) if len(track) >= .75 * len(samples)
               and track[0][0] <= 2 and track[-1][0] >= len(samples) - 3]
     if not tracks:
         return None

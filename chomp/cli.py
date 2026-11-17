@@ -11,6 +11,7 @@ from .clipwork import approve
 from .editorial import OllamaProvider
 from .manual import render_manual_preview, rerender
 from .pipeline import process
+from .reframe import StreamerAnchor
 
 
 def _render_options(parser: argparse.ArgumentParser, *, optional: bool = False) -> None:
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--facecam-model", type=Path, help="optional local YuNet model")
     p.add_argument("--saliency-model", type=Path, help="optional local U2Netp ONNX model for gameplay focus")
     p.add_argument("--person-model", type=Path, help="optional local PP-HumanSeg ONNX model for cutout detection")
+    p.add_argument("--streamer-anchor", metavar="MS,X,Y,W,H", help="source time and tight streamer face box for a manual clip")
     p.add_argument("--camera-slot", choices=["top", "bottom", "left", "right"], default="top")
     p.add_argument("--camera-motion", choices=["hold", "pan", "track"], default="pan",
                    help="gameplay crop movement for automatic Shorts framing")
@@ -145,6 +147,16 @@ def main(argv: list[str] | None = None) -> int:
 
     roi = parse_roi(args.facecam_roi, "--facecam-roi")
     gameplay = parse_roi(args.gameplay_roi, "--gameplay-roi")
+    anchor = None
+    if args.streamer_anchor is not None:
+        if args.start is None or args.layout != "shorts" or args.layout_plan or roi or gameplay:
+            p.error("--streamer-anchor requires an exact automatic Shorts clip")
+        stamp, _, bounds = args.streamer_anchor.partition(",")
+        try:
+            at_ms = int(stamp)
+        except ValueError:
+            p.error("--streamer-anchor starts with a source timestamp in integer milliseconds")
+        anchor = StreamerAnchor(at_ms, parse_roi(bounds, "--streamer-anchor face box"))
     shared = {
         "rights_ref": args.rights_ref, "transcript_path": args.transcript, "facecam_roi": roi,
         "gameplay_roi": gameplay, "layout": args.layout, "audio_stream": args.audio_stream,
@@ -170,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.input[0]), args.output, start_s=args.start, end_s=args.end,
                 transcribe=args.refine_captions or (args.transcribe and args.transcript is None), **shared,
                 title=args.title, burn_hook=args.burn_hook, sound_cues_path=args.sound_cues,
-                subject_plan_path=args.subject_plan,
+                subject_plan_path=args.subject_plan, streamer_anchor=anchor,
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
             _print({"source": args.input[0], "error": str(exc)})

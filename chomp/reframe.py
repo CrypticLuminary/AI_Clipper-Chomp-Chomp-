@@ -1,7 +1,7 @@
 """Plan Shorts using local detections, visible picture regions and motion over time."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 import json
 from math import hypot
@@ -10,9 +10,9 @@ from statistics import median
 from typing import TYPE_CHECKING
 
 from .artifacts import artifact_key, artifact_lock, digest_file, write_json
-from .camera_evidence import enclosing_perimeter, perimeter_support
+from .camera_evidence import competing_faces, enclosing_perimeter, face_agreement, face_tracks, perimeter_support
 from .camera_motion import camera_path
-from .media import LayoutSegment, Rectangle, exec_checked, probe
+from .media import LayoutSegment, Rectangle, exec_checked, probe, validate_roi
 from .subject_lock import SourceSpan, SubjectPlan, overlap_fraction, track_source
 from .subject_view import subject_review, subject_windows
 
@@ -22,24 +22,31 @@ if TYPE_CHECKING:
 CAMERA_FRACTION = .30
 _FACE_MODEL = Path(__file__).with_name("assets") / "face_detection_yunet_2023mar.onnx"
 _SAMPLE_FPS = 4
-_PLAN_REVISION = 12
+_PLAN_REVISION = 13
+
+
+@dataclass(frozen=True)
+class StreamerAnchor:
+    at_ms: int
+    face_roi: Rectangle
 
 
 def vision_fingerprint(face_model: Path | None, saliency_model: Path | None, *,
                        camera_motion: str = "pan", camera_fit: str = "auto",
-                       person_model: Path | None = None) -> dict:
+                       person_model: Path | None = None, streamer_anchor: StreamerAnchor | None = None) -> dict:
     from .framing import facecam_fingerprint
 
     info = facecam_fingerprint(face_model or _FACE_MODEL)
     return {**info, "saliency_sha256": digest_file(saliency_model) if saliency_model else None,
             "person_model_sha256": digest_file(person_model) if person_model else None,
+            "streamer_anchor": asdict(streamer_anchor) if streamer_anchor else None,
             "planner_revision": _PLAN_REVISION, "camera_motion": camera_motion, "camera_fit": camera_fit}
 
 
 def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int, cache: Path, *,
                        face_model: Path | None, saliency_model: Path | None, camera_slot: str,
                        fingerprint: dict, subject_plan: SubjectPlan | None = None,
-                       person_model: Path | None = None) -> FramingPlan:
+                       person_model: Path | None = None, streamer_anchor: StreamerAnchor | None = None) -> FramingPlan:
     from .framing import FramingPlan
 
     key = artifact_key([source_id, start_ms, end_ms, camera_slot, fingerprint])
@@ -52,7 +59,8 @@ def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int,
                                tuple(data["warnings"]), data.get("subject_tracking"))
         plan = plan_shorts(source, start_ms, end_ms, face_model=face_model, saliency_model=saliency_model,
                            camera_slot=camera_slot, camera_motion=fingerprint["camera_motion"],
-                           camera_fit=fingerprint["camera_fit"], subject_plan=subject_plan, person_model=person_model)
+                           camera_fit=fingerprint["camera_fit"], subject_plan=subject_plan, person_model=person_model,
+                           streamer_anchor=streamer_anchor)
         write_json(path, asdict(plan))
         return plan
 
@@ -263,6 +271,38 @@ def _track(samples: list[Sample], width: int) -> tuple[list[Camera | None], int]
         chosen.append(current)
         last = current
     return chosen, ambiguous
+
+
+def _restrict_to_anchor(samples: list[Sample], tracks, anchor: StreamerAnchor,
+                        size, frame_size, game_size) -> tuple[list[Sample], dict]:
+    """Limit both panel proposals and mask inference to the indicated face track."""
+    index = min(range(len(samples)), key=lambda i: abs(samples[i].time_ms - anchor.at_ms))
+    box = _map(anchor.face_roi, size, game_size)
+    candidates = []
+    if abs(samples[index].time_ms - anchor.at_ms) <= 1000 // _SAMPLE_FPS:
+        candidates = [track for track in tracks if any(i == index and face_agreement(face, box) for i, face in track)]
+    selected = dict(candidates[0]) if len(candidates) == 1 else {}
+    restricted = []
+    for i, sample in enumerate(samples):
+        face = selected.get(i)
+        cameras = [camera for camera in sample.cameras
+                   if face is not None and face_agreement(_map(camera.face, frame_size, game_size), face)]
+        restricted.append(replace(sample, cameras=cameras, faces=(face,) if face is not None else ()))
+    return restricted, {**asdict(anchor), "sample_ms": samples[index].time_ms, "face_samples": len(selected)}
+
+
+def _other_face_in_panel(groups, tracks, anchored, frame_size, game_size) -> bool:
+    """An anchored identity is insufficient when its proposed pane contains a rival face."""
+    for i, j, camera in groups:
+        if camera is None:
+            continue
+        box = _map(camera.box, frame_size, game_size)
+        for track in tracks:
+            count = sum(1 for index, face in track if i <= index < j and anchored[index].faces
+                        and not face_agreement(face, anchored[index].faces[0]) and overlap_fraction(face, box) >= .70)
+            if count >= min(4, max(2, j - i)):
+                return True
+    return False
 
 
 def _bridge_camera_gaps(source: Path, samples: list[Sample], tracked: list[Camera | None],
@@ -785,7 +825,7 @@ def oriented_size(video: dict) -> tuple[int, int]:
 def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
                 saliency_model: Path | None, camera_slot: str, camera_motion: str = "pan",
                  camera_fit: str = "auto", subject_plan: SubjectPlan | None = None,
-                 person_model: Path | None = None) -> FramingPlan:
+                 person_model: Path | None = None, streamer_anchor: StreamerAnchor | None = None) -> FramingPlan:
     from .framing import FramingPlan
 
     def fallback(reason: str) -> FramingPlan:
@@ -798,6 +838,11 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
 
     if camera_motion not in {"hold", "pan", "track"} or camera_fit not in {"auto", "contain"}:
         raise ValueError("Invalid Shorts camera motion or fit policy")
+    if streamer_anchor is not None:
+        if not start <= streamer_anchor.at_ms < end:
+            raise ValueError("Streamer anchor time must be inside the selected source interval")
+        if subject_plan is not None and not subject_plan.source_has_overlay:
+            raise ValueError("A streamer anchor needs a source with an overlay")
     try:
         import cv2
     except ImportError:
@@ -809,6 +854,8 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
     if video is None:
         return fallback("The source contains no video stream.")
     size = oriented_size(video)
+    if streamer_anchor is not None:
+        validate_roi(streamer_anchor.face_roi, *size, "Streamer anchor")
     sar = video.get("sample_aspect_ratio", "1:1")
     if sar not in {"1:1", "N/A", "0:1", None}:
         return fallback("Confirm framing manually for non-square source pixels.")
@@ -823,7 +870,7 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
     try:
         return _plan(source, start, end, size, rate, face_model or _FACE_MODEL, saliency_model,
                      camera_slot, fallback, camera_motion=camera_motion, camera_fit=camera_fit,
-                     subject_plan=subject_plan, person_model=person_model)
+                     subject_plan=subject_plan, person_model=person_model, streamer_anchor=streamer_anchor)
     except cv2.error as exc:
         raise ValueError("The local vision model could not analyze this source. Check the ONNX file and OpenCV.") from exc
     finally:
@@ -831,7 +878,7 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
 
 
 def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slot, fallback, *,
-          camera_motion="pan", camera_fit="auto", subject_plan=None, person_model=None):
+          camera_motion="pan", camera_fit="auto", subject_plan=None, person_model=None, streamer_anchor=None):
     import cv2
 
     from .framing import FramingPlan
@@ -844,6 +891,11 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
     samples, game_size = _sample(source, start, end, frame_size, detector)
     if len(samples) < 3:
         return fallback("There were too few decoded frames to track the scene.")
+    faces = face_tracks(samples)
+    competing = streamer_anchor is None and competing_faces(faces)
+    anchor_evidence = None
+    if streamer_anchor is not None:
+        samples, anchor_evidence = _restrict_to_anchor(samples, faces, streamer_anchor, size, frame_size, game_size)
     track, ambiguous = _track(samples, frame_size[0])
     detected_count = sum(camera is not None for camera in track)
     bridge = _bridge_camera_gaps(source, samples, track, frame_size, game_size, start, end, rate)
@@ -856,10 +908,14 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
         refined = _refine_panels(groups, samples, frame_size, game_size)
         groups, rejected = _verify_panels(source, groups, refined, track, samples, frame_size,
                                            game_size, start, end, rate)
+    mixed_panel = (streamer_anchor is not None and not unstable
+                   and _other_face_in_panel(groups, faces, samples, frame_size, game_size))
     detection = {"method": "shorts", "detector": "YuNet", "samples": len(samples),
                  "camera_observations": detected_count, "rejected_panel_groups": rejected,
+                 "streamer_anchor": anchor_evidence, "competing_face_tracks": competing,
+                 "another_face_inside_anchored_panel": mixed_panel,
                  "camera_motion": camera_motion, "camera_fit": camera_fit}
-    if detector is not None and (unstable or any(camera is None for _, _, camera in groups)):
+    if detector is not None and (unstable or competing or mixed_panel or any(camera is None for _, _, camera in groups)):
         cutout = None
         if person_model is not None:
             from .cutout import classify_cutout
@@ -867,8 +923,15 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
             cutout = classify_cutout(samples, person_model, game_size)
             if cutout is not None:
                 cutout["face_anchor"] = _map(cutout["face_anchor"], game_size, size)
-        reason = ("The streamer appears composited over gameplay. The complete source keeps it visible once."
-                  if cutout else "Source geometry is unverified. Review the complete source view.")
+        reason = "Source geometry is unverified. Review the complete source view."
+        if cutout is not None:
+            reason = "The streamer appears composited over gameplay. The complete source keeps it visible once."
+        elif anchor_evidence is not None and not anchor_evidence["face_samples"]:
+            reason = "The streamer anchor needs one matching face in the source. Review the complete source view."
+        elif mixed_panel:
+            reason = "Another face shares the proposed webcam crop. Review the complete source view."
+        elif competing:
+            reason = "Several faces persist in the source. Mark the streamer's face to choose a camera crop."
         segments = (LayoutSegment(start, end, "letterbox"),)
         subject = None
         warnings = [reason]
