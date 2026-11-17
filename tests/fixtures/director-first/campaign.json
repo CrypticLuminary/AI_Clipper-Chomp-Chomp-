@@ -1,0 +1,14 @@
+{
+  "rights_ref": "Synthetic Chomp-Chomp development fixture",
+  "clips": 3,
+  "duration": 35,
+  "min_duration": 20,
+  "max_duration": 60,
+  "platform": "YouTube Shorts",
+  "aspect_ratio": "9:16",
+  "preferred_topics": ["Unexpected acts of kindness", "Stories with a self-contained payoff"],
+  "excluded_topics": [],
+  "captions": true,
+  "human_review": true,
+  "brief": "Find standalone stories with a setup and payoff. Ordinary reactions to loud sounds are weak. Preserve the meaning and abstain when the complete story exceeds the allowed duration."
+}

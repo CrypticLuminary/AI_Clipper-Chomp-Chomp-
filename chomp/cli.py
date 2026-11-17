@@ -61,6 +61,10 @@ def _print(value: object) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "clip":
+        from .director.clip import main as clip_main
+
+        return clip_main(argv[1:])
     if argv and argv[0] in ("rerender", "approve"):
         return _revision_command(argv[0], argv[1:])
     if argv and argv[0] == "director":
@@ -72,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
 
         return shots_main(argv[1:])
     p = argparse.ArgumentParser(prog="chomp", description="Find and review highlights from authorized local VODs",
-                                epilog="Review commands: chomp rerender, chomp approve, chomp director, and chomp shots")
+                                epilog="Use chomp clip for Director selection. Review commands: chomp rerender, "
+                                       "chomp approve, chomp director, and chomp shots")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--input", action="append", required=True, metavar="LOCAL_VIDEO", help="local VOD file; repeat for batch")
     p.add_argument("--output", type=Path, default=Path("outputs"))

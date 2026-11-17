@@ -1,0 +1,28 @@
+{
+  "segments": [
+    {
+      "start_ms": 10000, "end_ms": 18000, "speaker_id": "speaker-a",
+      "text": "At the library we kept getting books back with a blue envelope tucked inside. I thought a patron was forgetting their mail."
+    },
+    {
+      "start_ms": 20000, "end_ms": 28000, "speaker_id": "speaker-a",
+      "text": "The librarian finally opened one. It said, I finished my first whole book. Please put this in the next one you lend my dad."
+    },
+    {
+      "start_ms": 30000, "end_ms": 37200, "speaker_id": "speaker-a",
+      "text": "It was a kid leaving his dad progress reports. After that we put an envelope in every book his dad checked out."
+    },
+    {
+      "start_ms": 47500, "end_ms": 55200, "speaker_id": "speaker-b",
+      "text": "The kitchen timer keeps going off in the middle of my streams. I asked my roommate to put it somewhere I could never hear it."
+    },
+    {
+      "start_ms": 79500, "end_ms": 83100, "speaker_id": "speaker-b",
+      "text": "Sorry, that was loud. Hold on."
+    },
+    {
+      "start_ms": 139000, "end_ms": 147200, "speaker_id": "speaker-b",
+      "text": "I found the kitchen timer. My roommate sent it to my mom, and she calls me every time it goes off."
+    }
+  ]
+}

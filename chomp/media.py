@@ -143,12 +143,16 @@ def decode_audio_window(path: Path, start_ms: int, end_ms: int, *, audio_stream:
 
 
 def scan_audio(path: Path, *, audio_stream: int = 0, hop_ms: int = 1000,
-               duration_ms: int | None = None) -> list[float]:
-    """Stream source-clock audio levels without keeping the waveform in memory."""
+               duration_ms: int | None = None, start_ms: int = 0) -> list[float]:
+    """Stream audio levels in bins starting at start_ms; duration_ms is the scan length."""
     if type(hop_ms) is not int or hop_ms < 10:
         raise ValueError("Audio hop must be an integer of at least 10 ms")
-    duration_ms = probe(path)["duration_ms"] if duration_ms is None else duration_ms
-    cmd = _audio_input(path, audio_stream) + [
+    if type(start_ms) is not int or start_ms < 0:
+        raise ValueError("Audio scan start must be a nonnegative integer")
+    duration_ms = probe(path)["duration_ms"] - start_ms if duration_ms is None else duration_ms
+    if type(duration_ms) is not int or duration_ms <= 0:
+        raise ValueError("Audio scan duration must be a positive integer")
+    cmd = _audio_input(path, audio_stream, start_ms) + [
         "-af", SOURCE_CLOCK_AUDIO_FILTER + ",apad", "-t", _seconds(duration_ms),
         "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "pipe:1",
     ]

@@ -43,15 +43,19 @@ def _job_status(database: sqlite3.Connection, job_id: str, source: Path, manifes
     database.commit()
 
 
-def _audio_curve(cache: Path, source: Path, source_id: str, audio_stream: int, duration_ms: int) -> tuple[list[float], bool]:
+def _audio_curve(cache: Path, source: Path, source_id: str, audio_stream: int, duration_ms: int, *,
+                 start_ms: int = 0) -> tuple[list[float], bool]:
     fingerprint = {"source_id": source_id, "audio_stream": audio_stream, "duration_ms": duration_ms,
                    "hop_ms": _AUDIO_HOP_MS, "analysis_version": 2}
+    if start_ms:
+        fingerprint["start_ms"] = start_ms
     key = artifact_key(fingerprint)
     path = cache / "audio" / f"{key}.json"
     with artifact_lock(cache / "locks" / f"{key}.lock", timeout=300):
         if path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))["levels"], True
-        levels = scan_audio(source, audio_stream=audio_stream, hop_ms=_AUDIO_HOP_MS, duration_ms=duration_ms)
+        region = {"start_ms": start_ms} if start_ms else {}
+        levels = scan_audio(source, audio_stream=audio_stream, hop_ms=_AUDIO_HOP_MS, duration_ms=duration_ms, **region)
         write_json(path, {"provenance": fingerprint, "levels": levels})
         return levels, False
 

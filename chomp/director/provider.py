@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from hashlib import sha256
 import json
 import os
@@ -108,44 +109,70 @@ def _events(output: str) -> tuple[dict | None, bool]:
 class CodexCLI:
     name = "codex_cli"
 
-    def __init__(self, model: str, timeout: int = 150):
+    def __init__(self, model: str, timeout: int = 150, *, effort: str = "medium"):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", model):
             raise ValueError("Supply a pinned Codex model name")
         if not 15 <= timeout <= 300:
             raise ValueError("Provider timeout must be 15 to 300 seconds")
         self.model = model
         self.timeout = timeout
+        if effort not in {"low", "medium"}:
+            raise ValueError("Unknown Codex reasoning effort")
+        self.effort = effort
 
-    def complete(self, prompt: str, images: list[bytes]) -> Response:
-        executable = shutil.which("codex")
-        if executable is None:
-            return Response("provider_unavailable", stderr="Codex CLI is unavailable on PATH.")
+    @property
+    def _options(self) -> dict:
         environment = {key: value for key, value in os.environ.items() if key.upper() not in {
             "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CHATGPT_BASE_URL",
         }}
-        options = {"env": environment, "encoding": "utf-8", "errors": "replace",
-                   "capture_output": True, "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+        return {"env": environment, "encoding": "utf-8", "errors": "replace",
+                "capture_output": True, "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
+    @cached_property
+    def _identity(self) -> tuple[str, str] | Response:
+        executable = shutil.which("codex")
+        if executable is None:
+            return Response("provider_unavailable", stderr="Codex CLI is unavailable on PATH.")
         try:
-            version = subprocess.run([executable, "--version"], timeout=10, **options)
-            login = subprocess.run([executable, "login", "status"], timeout=15, **options)
+            version = subprocess.run([executable, "--version"], timeout=10, **self._options)
+            login = subprocess.run([executable, "login", "status"], timeout=15, **self._options)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return Response("provider_unavailable", stderr=_safe_log(str(exc)))
         cli_version = version.stdout.strip()[:100]
         if version.returncode or login.returncode or "using ChatGPT" not in login.stdout + login.stderr:
             return Response("provider_unavailable", cli_version=cli_version or None,
                             stderr="Use an existing ChatGPT subscription sign-in with Codex CLI.")
+        return executable, cli_version
 
+    @property
+    def fingerprint(self) -> dict:
+        identity = self._identity
+        return {"provider": self.name, "model": self.model, "effort": self.effort,
+                "cli_version": identity.cli_version if isinstance(identity, Response) else identity[1]}
+
+    def complete(self, prompt: str, images: list[bytes]) -> Response:
+        return self._complete(prompt, decision_schema(), images, self.timeout)
+
+    def complete_structured(self, prompt: str, contract: dict, *, timeout: float) -> Response:
+        return self._complete(prompt, contract, [], min(self.timeout, timeout))
+
+    def _complete(self, prompt: str, contract: dict, images: list[bytes], timeout: float) -> Response:
+        identity = self._identity
+        if isinstance(identity, Response):
+            return identity
+        executable, cli_version = identity
         with TemporaryDirectory(prefix="chomp-director-") as temp:
             workspace = Path(temp)
             spec = workspace / "response.schema.json"
-            spec.write_text(json_text(decision_schema()), encoding="utf-8")
+            spec.write_text(json_text(contract), encoding="utf-8")
             final = workspace / "response.json"
             args = [
                 executable, "-a", "never", "exec", "--sandbox", "read-only", "--ignore-user-config",
                 "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--color", "never",
                 "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "multi_agent",
-                "--disable", "multi_agent_v2", "-c", 'web_search="disabled"', "-c", "mcp_servers={}",
-                "-c", 'model_reasoning_effort="medium"', "--model", self.model,
+                "--disable", "multi_agent_v2", "--disable", "apps", "--disable", "skill_search",
+                "-c", 'web_search="disabled"', "-c", "mcp_servers={}",
+                "-c", f'model_reasoning_effort="{self.effort}"', "--model", self.model,
                 "--output-schema", str(spec), "--output-last-message", str(final), "--json",
             ]
             for i, content in enumerate(images, 1):
@@ -153,7 +180,7 @@ class CodexCLI:
                 path.write_bytes(content)
                 args.extend(("--image", str(path)))
             try:
-                result = subprocess.run([*args, "-"], input=prompt, cwd=workspace, timeout=self.timeout, **options)
+                result = subprocess.run([*args, "-"], input=prompt, cwd=workspace, timeout=timeout, **self._options)
             except subprocess.TimeoutExpired as exc:
                 return Response("timeout", _safe_log(exc.stdout), _safe_log(exc.stderr), cli_version=cli_version)
             except OSError as exc:

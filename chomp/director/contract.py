@@ -33,12 +33,12 @@ def read_json(path: Path):
                       parse_constant=invalid_number)
 
 
-def check_schema(value: dict, name: str) -> None:
+def check_schema(value: dict, name: str, *, contract: dict | None = None) -> None:
     try:
         from jsonschema import Draft202012Validator
     except ImportError as exc:
         raise RuntimeError("Install chomp-chomp[director] for schema validation") from exc
-    error = next(Draft202012Validator(schema(name)).iter_errors(value), None)
+    error = next(Draft202012Validator(schema(name) if contract is None else contract).iter_errors(value), None)
     if error:
         location = ".".join(str(i) for i in error.absolute_path) or name
         raise ValueError(f"Invalid {location}: {error.message}")
