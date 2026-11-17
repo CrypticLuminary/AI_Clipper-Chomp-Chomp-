@@ -98,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--facecam-roi", help="source pixel rectangle x,y,w,h")
     p.add_argument("--facecam-model", type=Path, help="optional local YuNet model")
     p.add_argument("--saliency-model", type=Path, help="optional local U2Netp ONNX model for gameplay focus")
+    p.add_argument("--person-model", type=Path, help="optional local PP-HumanSeg ONNX model for cutout detection")
     p.add_argument("--camera-slot", choices=["top", "bottom", "left", "right"], default="top")
     p.add_argument("--camera-motion", choices=["hold", "pan", "track"], default="pan",
                    help="gameplay crop movement for automatic Shorts framing")
@@ -122,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--facecam-model requires a detector layout")
     if (args.saliency_model is not None or args.camera_slot != "top") and args.layout != "shorts":
         p.error("--saliency-model and --camera-slot require --layout shorts")
+    if args.person_model is not None and (
+        args.layout != "shorts" or args.facecam_roi is not None or args.layout_plan is not None
+    ):
+        p.error("--person-model requires automatic Shorts framing")
     if (args.camera_motion, args.camera_fit) != ("pan", "auto") and (
         args.layout != "shorts" or args.facecam_roi is not None or args.layout_plan is not None
     ):
@@ -145,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         "gameplay_roi": gameplay, "layout": args.layout, "audio_stream": args.audio_stream,
         "facecam_model": args.facecam_model, "layout_plan": args.layout_plan, "profile": args.profile,
         "saliency_model": args.saliency_model, "camera_slot": args.camera_slot,
+        "person_model": args.person_model,
         "camera_motion": args.camera_motion, "camera_fit": args.camera_fit,
         "caption_position": args.caption_position, "audio_profile": args.audio_profile,
         "asr_model": args.asr_model, "asr_device": args.asr_device, "asr_language": args.language,

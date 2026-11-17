@@ -67,7 +67,7 @@ def process(
     refine_captions: bool = False, caption_position: str = "lower", profile: str = "preview",
     audio_profile: str = "original", reaction_lag_ms: int = 0, proposals_per_hour: int = 40,
     editorial_provider: EditorialProvider | None = None, semantic_budget: int = 12,
-    saliency_model: Path | None = None, camera_slot: str = "top",
+    saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
     camera_motion: str = "pan", camera_fit: str = "auto",
     burn_hook: bool = False,
 ) -> dict:
@@ -110,7 +110,7 @@ def process(
     }
     if layout == "shorts" and facecam_roi is None and layout_plan is None:
         config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
-                                              camera_fit=camera_fit)
+                                              camera_fit=camera_fit, person_model=person_model)
     elif layout == "auto-facecam" and facecam_roi is None and layout_plan is None:
         config["facecam_detector"] = facecam_fingerprint(facecam_model)
     job_id = artifact_key(config)[:24]
@@ -236,7 +236,8 @@ def process(
                         if "vision" in config:
                             framing = cached_shorts_plan(media, source_id, start_ms, end_ms, cache,
                                                          face_model=facecam_model, saliency_model=saliency_model,
-                                                         camera_slot=camera_slot, fingerprint=config["vision"])
+                                                         camera_slot=camera_slot, fingerprint=config["vision"],
+                                                         person_model=person_model)
                         elif overrides is None and layout == "shorts":
                             framing = plan_framing(media, start_ms, end_ms, layout, facecam_roi, facecam_model,
                                                    camera_slot=camera_slot)

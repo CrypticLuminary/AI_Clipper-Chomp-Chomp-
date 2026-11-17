@@ -10,6 +10,7 @@ from statistics import median
 from typing import TYPE_CHECKING
 
 from .artifacts import artifact_key, artifact_lock, digest_file, write_json
+from .camera_evidence import enclosing_perimeter, perimeter_support
 from .camera_motion import camera_path
 from .media import LayoutSegment, Rectangle, exec_checked, probe
 from .subject_lock import SourceSpan, SubjectPlan, overlap_fraction, track_source
@@ -21,21 +22,24 @@ if TYPE_CHECKING:
 CAMERA_FRACTION = .30
 _FACE_MODEL = Path(__file__).with_name("assets") / "face_detection_yunet_2023mar.onnx"
 _SAMPLE_FPS = 4
-_PLAN_REVISION = 11
+_PLAN_REVISION = 12
 
 
 def vision_fingerprint(face_model: Path | None, saliency_model: Path | None, *,
-                       camera_motion: str = "pan", camera_fit: str = "auto") -> dict:
+                       camera_motion: str = "pan", camera_fit: str = "auto",
+                       person_model: Path | None = None) -> dict:
     from .framing import facecam_fingerprint
 
     info = facecam_fingerprint(face_model or _FACE_MODEL)
     return {**info, "saliency_sha256": digest_file(saliency_model) if saliency_model else None,
+            "person_model_sha256": digest_file(person_model) if person_model else None,
             "planner_revision": _PLAN_REVISION, "camera_motion": camera_motion, "camera_fit": camera_fit}
 
 
 def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int, cache: Path, *,
                        face_model: Path | None, saliency_model: Path | None, camera_slot: str,
-                       fingerprint: dict, subject_plan: SubjectPlan | None = None) -> FramingPlan:
+                       fingerprint: dict, subject_plan: SubjectPlan | None = None,
+                       person_model: Path | None = None) -> FramingPlan:
     from .framing import FramingPlan
 
     key = artifact_key([source_id, start_ms, end_ms, camera_slot, fingerprint])
@@ -48,7 +52,7 @@ def cached_shorts_plan(source: Path, source_id: str, start_ms: int, end_ms: int,
                                tuple(data["warnings"]), data.get("subject_tracking"))
         plan = plan_shorts(source, start_ms, end_ms, face_model=face_model, saliency_model=saliency_model,
                            camera_slot=camera_slot, camera_motion=fingerprint["camera_motion"],
-                           camera_fit=fingerprint["camera_fit"], subject_plan=subject_plan)
+                           camera_fit=fingerprint["camera_fit"], subject_plan=subject_plan, person_model=person_model)
         write_json(path, asdict(plan))
         return plan
 
@@ -65,6 +69,8 @@ class Sample:
     time_ms: int
     game: object
     cameras: list[Camera]
+    # Face anchors use the coordinates of the downsampled gameplay image.
+    faces: tuple[Rectangle, ...] = ()
 
 
 def _center(rect: Rectangle) -> tuple[float, float]:
@@ -109,7 +115,7 @@ def _edge_candidates(values, low: float, high: float, expected: float, boundary:
 
 
 def camera_container(frame, face: Rectangle) -> Camera | None:
-    """Find rectangular panel boundaries around a face anywhere in a frame."""
+    """Propose a rectangle around a face for later temporal verification."""
     import numpy as np
 
     height, width = frame.shape[:2]
@@ -212,16 +218,20 @@ def _sample(source: Path, start: int, end: int, frame_size: tuple[int, int], det
                 break
             _, faces = detector.detect(frame) if detector is not None else (None, None)
             observations = []
+            face_boxes = []
             if faces is not None:
                 for row in sorted(faces, key=lambda row: float(row[-1]), reverse=True)[:4]:
                     face = tuple(round(float(v)) for v in row[:4])
                     if min(face[2:]) < 15:
                         continue
+                    x, y, w, h = face
+                    if x >= 0 and y >= 0 and x + w <= width and y + h <= height:
+                        face_boxes.append(_map(face, frame_size, game_size))
                     camera = camera_container(frame, face)
                     if camera:
                         observations.append(camera)
             game = cv2.resize(frame, game_size, interpolation=cv2.INTER_AREA)
-            samples.append(Sample(at, game, observations))
+            samples.append(Sample(at, game, observations, tuple(face_boxes)))
     return samples, game_size
 
 
@@ -375,26 +385,6 @@ def _confirm_edge_panels(source: Path, groups: list[tuple[int, int, Camera | Non
     return evidence
 
 
-def _verify_short_opening_panel(source, groups, tracked, frame_size, start, end, rate, detector):
-    """Check a short opening panel before using it as an occlusion mask."""
-    i, j, smoothed = groups[0]
-    witnessed = tracked[0]
-    if j - i > 2 or witnessed is None or smoothed is None or _iou(witnessed.box, smoothed.box) >= .62:
-        return
-    frames = _read_frames(source, start, min(end, start + 160), *frame_size, rate)[:3]
-    if len(frames) < 3:
-        return
-    for frame in frames:
-        _, faces = detector.detect(frame)
-        boxes = [tuple(round(float(value)) for value in row[:4]) for row in faces[:4]] if faces is not None else []
-        if not any(_iou(box, witnessed.face) >= .66 for box in boxes):
-            return
-        panel = camera_container(frame, max(boxes, key=lambda box: _iou(box, witnessed.face)))
-        if panel is None or _iou(panel.box, witnessed.box) < .68:
-            return
-    groups[0] = i, j, witnessed
-
-
 def _refine_panels(groups: list[tuple[int, int, Camera | None]], samples: list[Sample],
                    frame_size: tuple[int, int], game_size: tuple[int, int]):
     """Resolve panel seams over recurring shots, where webcam pixels vary independently of the game."""
@@ -474,6 +464,69 @@ def _refine_panels(groups: list[tuple[int, int, Camera | None]], samples: list[S
                 cached[related] = _map((a, c, b - a, d - c), game_size, frame_size) if valid else center_box
         refined.append((i, j, Camera(camera.face, cached[related], camera.confidence)))
     return refined
+
+
+def _verify_panels(source: Path, groups, refined, tracked, samples, frame_size, game_size,
+                   start: int, end: int, rate: Fraction):
+    """Publish only rectangles supported by a recurring, enclosing perimeter."""
+    import numpy as np
+
+    verified = []
+    rejected = 0
+    for (i, j, original), (_, _, adjusted) in zip(groups, refined):
+        if original is None:
+            verified.append((i, j, None))
+            continue
+        candidates = [adjusted, original]
+        frames = np.stack([sample.game for sample in samples[i:j]])
+        if len(frames) < 4 and (i == 0 or j == len(samples)):
+            # A trim can leave too few coarse samples of a genuine opening or
+            # closing panel. Require live, repeated boundaries at that edge.
+            lo, hi = (start, min(end, start + 145)) if i == 0 else (max(start, end - 145), end)
+            frames = _read_frames(source, lo, hi, *game_size, min(rate, 30))
+            witness = tracked[i] if i == 0 else tracked[j - 1]
+            candidates = [witness, *candidates]
+        panel = None
+        if len(frames) >= 4:
+            for candidate in candidates:
+                if candidate is None:
+                    continue
+                box = _map(candidate.box, frame_size, game_size)
+                support = perimeter_support(frames, box)
+                if enclosing_perimeter(support) or _panel_continues_to_frame_edge(
+                    box, support, tracked[i:j], samples[i:j], frame_size, game_size
+                ):
+                    panel = candidate
+                    break
+        rejected += panel is None
+        verified.append((i, j, panel))
+    return verified, rejected
+
+
+def _panel_continues_to_frame_edge(box, support, observations, samples, frame_size, game_size) -> bool:
+    """A zoom can leave one visible seam if other frames verify the same panel."""
+    import numpy as np
+
+    interior = [i for i, value in enumerate(support) if value is not None]
+    if len(interior) != 1 or support[interior[0]] < .875:
+        return False
+    side = interior[0]
+
+    def coordinate(rect):
+        x, y, w, h = rect
+        return (x, x + w, y, y + h)[side]
+
+    # Compare only recurrent observations on the same anchored side. A
+    # full-height tile alone cannot be inferred from a single gameplay edge.
+    peers = {}
+    for observation, sample in zip(observations, samples):
+        if observation is None:
+            continue
+        peer = _map(observation.box, frame_size, game_size)
+        if _iou(box, peer) >= .85 and abs(coordinate(box) - coordinate(peer)) <= 2:
+            peers.setdefault(peer, []).append(sample.game)
+    return any(len(images) >= 4 and enclosing_perimeter(perimeter_support(np.stack(images), peer))
+               for peer, images in peers.items())
 
 
 def _fit(rect: Rectangle, aspect: float, center: tuple[float, float]) -> Rectangle:
@@ -731,13 +784,16 @@ def oriented_size(video: dict) -> tuple[int, int]:
 
 def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
                 saliency_model: Path | None, camera_slot: str, camera_motion: str = "pan",
-                camera_fit: str = "auto", subject_plan: SubjectPlan | None = None) -> FramingPlan:
+                 camera_fit: str = "auto", subject_plan: SubjectPlan | None = None,
+                 person_model: Path | None = None) -> FramingPlan:
     from .framing import FramingPlan
 
     def fallback(reason: str) -> FramingPlan:
         if subject_plan is not None:
             raise ValueError(f"SubjectLock could not establish a source layout. {reason}")
-        return FramingPlan("letterbox", None, {"method": "shorts_fallback", "reason": reason},
+        return FramingPlan("letterbox", None, {"method": "shorts_fallback", "reason": reason,
+                                               "source_geometry": "unknown"},
+                           (LayoutSegment(start, end, "letterbox"),),
                            warnings=(reason, "Review the complete frame for essential details."))
 
     if camera_motion not in {"hold", "pan", "track"} or camera_fit not in {"auto", "contain"}:
@@ -767,7 +823,7 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
     try:
         return _plan(source, start, end, size, rate, face_model or _FACE_MODEL, saliency_model,
                      camera_slot, fallback, camera_motion=camera_motion, camera_fit=camera_fit,
-                     subject_plan=subject_plan)
+                     subject_plan=subject_plan, person_model=person_model)
     except cv2.error as exc:
         raise ValueError("The local vision model could not analyze this source. Check the ONNX file and OpenCV.") from exc
     finally:
@@ -775,7 +831,7 @@ def plan_shorts(source: Path, start: int, end: int, *, face_model: Path | None,
 
 
 def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slot, fallback, *,
-          camera_motion="pan", camera_fit="auto", subject_plan=None):
+          camera_motion="pan", camera_fit="auto", subject_plan=None, person_model=None):
     import cv2
 
     from .framing import FramingPlan
@@ -793,13 +849,38 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
     bridge = _bridge_camera_gaps(source, samples, track, frame_size, game_size, start, end, rate)
     groups = _groups(track, frame_size[0])
     edge_panels = _confirm_edge_panels(source, groups, track, samples, frame_size, start, end, rate, detector)
-    if ambiguous >= len(samples) / 3 or len(groups) > 18:
-        return fallback("Several possible camera regions or rapid layout changes need review.")
-    groups = _refine_panels(groups, samples, frame_size, game_size)
-    groups = _gameplay_shots(groups, samples, frame_size, game_size)
+    unstable = ambiguous >= len(samples) / 3 or len(groups) > 18
+    if unstable:
+        rejected = sum(camera is not None for _, _, camera in groups)
+    else:
+        refined = _refine_panels(groups, samples, frame_size, game_size)
+        groups, rejected = _verify_panels(source, groups, refined, track, samples, frame_size,
+                                           game_size, start, end, rate)
+    detection = {"method": "shorts", "detector": "YuNet", "samples": len(samples),
+                 "camera_observations": detected_count, "rejected_panel_groups": rejected,
+                 "camera_motion": camera_motion, "camera_fit": camera_fit}
+    if detector is not None and (unstable or any(camera is None for _, _, camera in groups)):
+        cutout = None
+        if person_model is not None:
+            from .cutout import classify_cutout
 
-    if subject_plan is not None and detector is not None:
-        _verify_short_opening_panel(source, groups, track, frame_size, start, end, rate, detector)
+            cutout = classify_cutout(samples, person_model, game_size)
+            if cutout is not None:
+                cutout["face_anchor"] = _map(cutout["face_anchor"], game_size, size)
+        reason = ("The streamer appears composited over gameplay. The complete source keeps it visible once."
+                  if cutout else "Source geometry is unverified. Review the complete source view.")
+        segments = (LayoutSegment(start, end, "letterbox"),)
+        subject = None
+        warnings = [reason]
+        if subject_plan is not None:
+            subject = track_source(source, subject_plan, (SourceSpan(start, end, None, False, 1.),), size)
+            warnings.extend(subject_review(subject, segments))
+        return FramingPlan("letterbox", None, {**detection, "source_geometry": "foreground_cutout" if cutout else "unknown",
+                           "cutout_evidence": cutout,
+                           "camera_samples": 0, "camera_containers": [], "gameplay_evidence": "source_frame",
+                           "reason": reason}, segments, tuple(warnings), subject)
+
+    groups = _gameplay_shots(groups, samples, frame_size, game_size)
     model = ForegroundSaliency(saliency_model) if saliency_model and subject_plan is None else None
     warnings = set()
     segments = []
@@ -851,11 +932,6 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
                     "start_ms": a, "end_ms": b, "source_box": source_box,
                     "confidence": float(camera.confidence),
                 })
-        elif count:
-            warnings.add("Webcam coverage was uncertain in part of the cut; review those spans.")
-            segments.append(LayoutSegment(a, b, "letterbox"))
-            continue
-
         mask = _map(cam_box, frame_size, game_size) if cam_box else None
         # Leave room for sampling and compression around the container edge.
         if mask:
@@ -899,19 +975,16 @@ def _plan(source, start, end, size, rate, face_model, saliency_model, camera_slo
         segments.append(LayoutSegment(a, b, layout, cam_crop, crop, fit_camera, False,
                                       tuple(knots), camera_fraction, camera_slot))
 
-    if not count and (subject_plan is None or subject_plan.source_has_overlay):
-        warnings.add("No webcam panel was verified. Review the gameplay crop and HUD.")
     if subject is not None:
         warnings.update(subject_review(subject, segments))
     if side_inset:
         warnings.add("Check that the camera inset leaves the important UI visible.")
     total_layout = segments[0].layout if len(segments) == 1 else "temporal"
     return FramingPlan(total_layout, segments[0].facecam_roi if len(segments) == 1 else None,
-                       {"method": "shorts", "detector": "YuNet", "samples": len(samples),
+                       {**detection,
+                        "source_geometry": "rectangular_webcam" if count else "no_overlay_declared",
                         "camera_samples": count, "camera_containers": containers,
-                        "camera_observations": detected_count, "camera_continuity": bridge,
-                        "verified_edge_panels": edge_panels,
-                        "camera_motion": camera_motion, "camera_fit": camera_fit,
+                        "camera_continuity": bridge, "verified_edge_panels": edge_panels,
                         "gameplay_evidence": ("subject_lock" if subject is not None else
                                               "motion_and_u2netp" if model else "motion_and_detail")},
                        tuple(segments), tuple(sorted(warnings)), subject)

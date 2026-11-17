@@ -30,7 +30,7 @@ def render_manual_preview(
     layout_plan: Path | None = None, captions_override: Path | None = None,
     expected_source_id: str | None = None, layout_segments_override: list[dict] | None = None,
     parent_edit: str | None = None,
-    saliency_model: Path | None = None, camera_slot: str = "top",
+    saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
     camera_motion: str = "pan", camera_fit: str = "auto",
     title: str | None = None, burn_hook: bool = False,
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
@@ -82,7 +82,7 @@ def render_manual_preview(
         config["sound_cues"] = [asdict(cue) for cue in mix]
     if layout == "shorts" and facecam_roi is None and overrides is None:
         config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
-                                              camera_fit=camera_fit)
+                                              camera_fit=camera_fit, person_model=person_model)
         if subject_plan is not None:
             config["vision"]["subject"] = {"revision": TRACK_REVISION, "plan": asdict(subject_plan)}
     elif layout == "auto-facecam" and facecam_roi is None and overrides is None:
@@ -103,7 +103,8 @@ def render_manual_preview(
         if "vision" in config:
             framing = cached_shorts_plan(source, source_id, start_ms, end_ms, output_root / ".analysis",
                                          face_model=facecam_model, saliency_model=saliency_model,
-                                         camera_slot=camera_slot, fingerprint=config["vision"], subject_plan=subject_plan)
+                                         camera_slot=camera_slot, fingerprint=config["vision"],
+                                         subject_plan=subject_plan, person_model=person_model)
         elif overrides is None:
             framing = plan_framing(source, start_ms, end_ms, layout, facecam_roi, facecam_model,
                                    camera_slot=camera_slot)

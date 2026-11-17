@@ -333,14 +333,14 @@ def _sample_facecam(source: Path, start_ms: int, end_ms: int, model: Path | None
 def plan_framing(
     source: Path, start_ms: int, end_ms: int, layout: str,
     facecam_roi: Rectangle | None, facecam_model: Path | None = None,
-    *, saliency_model: Path | None = None, camera_slot: str = "top",
+    *, saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
 ) -> FramingPlan:
     if layout == "shorts":
         from .reframe import CAMERA_FRACTION, plan_shorts
 
         if facecam_roi is None:
             return plan_shorts(source, start_ms, end_ms, face_model=facecam_model,
-                               saliency_model=saliency_model, camera_slot=camera_slot)
+                               saliency_model=saliency_model, camera_slot=camera_slot, person_model=person_model)
         segments = (LayoutSegment(start_ms, end_ms, "facecam-gameplay", facecam_roi,
                                   preserve_gameplay=False, camera_fraction=CAMERA_FRACTION,
                                   camera_slot=camera_slot),)
