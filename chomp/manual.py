@@ -14,7 +14,7 @@ from .clipwork import SCHEMA, create_clip, read_layout_plan, review_page
 from .framing import FramingPlan, facecam_fingerprint, plan_framing
 from .media import RENDER_VERSION, check_audio_track, probe
 from .models import checked_span
-from .reframe import cached_shorts_plan, oriented_size, vision_fingerprint
+from .reframe import StreamerAnchor, cached_shorts_plan, oriented_size, vision_fingerprint
 from .signals import read_transcript
 from .sound import read_sound_cues
 from .subject_lock import TRACK_REVISION, read_subject_plan
@@ -30,12 +30,12 @@ def render_manual_preview(
     layout_plan: Path | None = None, captions_override: Path | None = None,
     expected_source_id: str | None = None, layout_segments_override: list[dict] | None = None,
     parent_edit: str | None = None,
-    saliency_model: Path | None = None, camera_slot: str = "top",
+    saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
     camera_motion: str = "pan", camera_fit: str = "auto",
     title: str | None = None, burn_hook: bool = False,
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
     sound_cues_path: Path | None = None, saved_sound_cues: list[dict] | None = None,
-    subject_plan_path: Path | None = None,
+    subject_plan_path: Path | None = None, streamer_anchor: StreamerAnchor | None = None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -55,6 +55,8 @@ def render_manual_preview(
     if layout_plan is not None and layout_segments_override is not None:
         raise ValueError("Supply one layout plan")
     overrides = read_layout_plan(layout_plan) if layout_plan is not None else layout_segments_override
+    if streamer_anchor is not None and (layout != "shorts" or facecam_roi or gameplay_roi or overrides is not None):
+        raise ValueError("A streamer anchor requires automatic Shorts framing")
     subject_plan = None
     if subject_plan_path is not None:
         if layout != "shorts" or facecam_roi is not None or gameplay_roi is not None or overrides is not None:
@@ -82,7 +84,8 @@ def render_manual_preview(
         config["sound_cues"] = [asdict(cue) for cue in mix]
     if layout == "shorts" and facecam_roi is None and overrides is None:
         config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
-                                              camera_fit=camera_fit)
+                                              camera_fit=camera_fit, person_model=person_model,
+                                              streamer_anchor=streamer_anchor)
         if subject_plan is not None:
             config["vision"]["subject"] = {"revision": TRACK_REVISION, "plan": asdict(subject_plan)}
     elif layout == "auto-facecam" and facecam_roi is None and overrides is None:
@@ -103,7 +106,9 @@ def render_manual_preview(
         if "vision" in config:
             framing = cached_shorts_plan(source, source_id, start_ms, end_ms, output_root / ".analysis",
                                          face_model=facecam_model, saliency_model=saliency_model,
-                                         camera_slot=camera_slot, fingerprint=config["vision"], subject_plan=subject_plan)
+                                         camera_slot=camera_slot, fingerprint=config["vision"],
+                                         subject_plan=subject_plan, person_model=person_model,
+                                         streamer_anchor=streamer_anchor)
         elif overrides is None:
             framing = plan_framing(source, start_ms, end_ms, layout, facecam_roi, facecam_model,
                                    camera_slot=camera_slot)

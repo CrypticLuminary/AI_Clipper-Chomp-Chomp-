@@ -20,7 +20,7 @@ from .sound import SoundCue, cues_in_range
 
 SAMPLE_RATE = 2000
 SOURCE_CLOCK_AUDIO_FILTER = "aresample=async=1:first_pts=0"
-RENDER_VERSION = 6
+RENDER_VERSION = 7
 LAYOUTS = {"facecam-gameplay", "gameplay-only", "fit", "letterbox"}
 Rectangle = tuple[int, int, int, int]
 
@@ -422,11 +422,13 @@ def render_preview(
     if source == output or (output.exists() and source.samefile(output)):
         raise ValueError("Output must be separate from the source")
 
-    # Normalize non-square pixels after cropping, so source-coordinate ROIs work.
-    # For temporal cuts the frame grid is shared by every branch. Audio is never concatenated.
+    # A full-source Shorts fallback uses the same frame grid as temporal cuts.
+    # A seek between source frames otherwise shifts its first frame and can drop the last.
+    full_source_shorts = (compiled_shots is None and shorts and len(segments) == 1
+                          and segments[0].layout == "letterbox" and segments[0].gameplay_roi is None)
     if compiled_shots is not None:
         graph = compiled_shots.graph
-    elif len(segments) == 1:
+    elif len(segments) == 1 and not full_source_shorts:
         graph = _composite("[0:v:0]", "[stage]", segments[0], width, height, "a", sar)
     else:
         try:
@@ -437,17 +439,22 @@ def render_preview(
             rate = Fraction(30)
         if any((seg.end_ms - seg.start_ms) * rate < 1000 for seg in segments):
             raise ValueError("Temporal layout segment is shorter than one source frame")
-        inputs = "".join(f"[input{i}]" for i in range(len(segments)))
-        filters = [f"[0:v:0]fps={rate}:start_time=0,split={len(segments)}{inputs}"]
-        for i, seg in enumerate(segments):
-            begin = _seconds(seg.start_ms - start_ms)
-            finish = _seconds(seg.end_ms - start_ms)
-            # An end trim on each split branch lets concat finish the branch at the cut.
-            filters.append(f"[input{i}]trim=start={begin}:end={finish},setpts=PTS-STARTPTS[part{i}]")
-            filters.append(_composite(f"[part{i}]", f"[view{i}]", seg, width, height, f"x{i}", sar))
-        views = "".join(f"[view{i}]" for i in range(len(segments)))
-        filters.append(f"{views}concat=n={len(segments)}:v=1:a=0[stage]")
-        graph = ";".join(filters)
+        clock = f"[0:v:0]fps={rate}:start_time=0"
+        if full_source_shorts:
+            graph = (f"{clock},trim=end={duration}[full_source];"
+                     + _composite("[full_source]", "[stage]", segments[0], width, height, "a", sar))
+        else:
+            inputs = "".join(f"[input{i}]" for i in range(len(segments)))
+            filters = [f"{clock},split={len(segments)}{inputs}"]
+            for i, seg in enumerate(segments):
+                begin = _seconds(seg.start_ms - start_ms)
+                finish = _seconds(seg.end_ms - start_ms)
+                # An end trim on each split branch lets concat finish the branch at the cut.
+                filters.append(f"[input{i}]trim=start={begin}:end={finish},setpts=PTS-STARTPTS[part{i}]")
+                filters.append(_composite(f"[part{i}]", f"[view{i}]", seg, width, height, f"x{i}", sar))
+            views = "".join(f"[view{i}]" for i in range(len(segments)))
+            filters.append(f"{views}concat=n={len(segments)}:v=1:a=0[stage]")
+            graph = ";".join(filters)
 
     with tempfile.TemporaryDirectory(prefix=".render-", dir=output.parent) as scratch, staged_file(output) as staged:
         scratch = Path(scratch)
@@ -501,7 +508,7 @@ def render_preview(
             graph += (";" + "".join(labels) + f"amix=inputs={len(labels)}:duration=first:"
                       f"dropout_transition=0:normalize=0,alimiter=limit=.84:level=false:latency=true{loudness}[mix]")
             audio_map = ["-map", "[mix]"]
-        elif len(segments) > 1:
+        elif len(segments) > 1 or full_source_shorts:
             # FFmpeg 8.0.1 can stall on split/concat video with a separate
             # audio filter graph when the selected audio stream starts late.
             graph += f";[0:a:{audio_stream}]{audio_filter}{loudness}[selected_audio]"
@@ -512,9 +519,9 @@ def render_preview(
             graph_args = ["-filter_complex_script", "video-filters.txt"]
         encoding = (["-b:v", "12M", "-maxrate", "18M", "-bufsize", "24M"]
                     if shorts and width >= 1080 else ["-crf", "20" if width >= 1080 else "23"])
-        # ShotComposer already bounds video by frame count and audio by sample
-        # duration. Muxer -t rounding can discard its last legal video frame.
-        time_limit = ["-t", duration] if compiled_shots is None else []
+        # These graphs bound both media streams. Muxer -t rounding can discard
+        # the last legal video frame.
+        time_limit = ["-t", duration] if compiled_shots is None and not full_source_shorts else []
         args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error", "-xerror",
                 "-ss", _seconds(start_ms), "-i", str(source), *audio_inputs, *time_limit,
                 "-filter_complex_threads", "1", *graph_args,
