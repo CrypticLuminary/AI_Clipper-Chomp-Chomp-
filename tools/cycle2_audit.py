@@ -20,7 +20,7 @@ def main():
              "All listed remote branches are ancestors of this baseline. Source diffs and merge bases confirm that the camera, cutout, caption, evaluation, boundary and diarization fixes are integrated; no cherry-picks are needed.",
              "", "| Remote branch | Head | Merge base with baseline | Unique to branch / baseline | Changed files |", "|---|---|---|---|---:|"]
     for ref in refs:
-        if ref.endswith("/HEAD"):
+        if ref.endswith(("/HEAD", "/work/cycle2-keystone", "/research/ds01-deepscout")):
             continue
         head = git("rev-parse", ref)
         common = git("merge-base", ref, base)
@@ -31,7 +31,8 @@ def main():
     lines += ["", "Dependency chain: foundation → Bridge integration (merges CUT-06, CAPT-08, EVAL-07 and VOICE-03 fixes) → Stage 1 quality → EDIT-01 → stable camera → SubjectLock → ShotComposer → transparent cutout → Director First.",
               "", "The local foundation worktree is behind its remote. A local branch named `origin/integration/integ09-sol61-work-bridge` shadows the remote's short name; audit uses `refs/remotes/origin/...` when ambiguity matters. Existing worktrees and local changes were left untouched.",
               "", "No unresolved merge conflicts exist in the new worktree. Semantic production and Director First are divergent workflows, addressed through an opt-in validated renderer bridge; existing experimental components remain available.",
-              "", "Open PRs observed through GitHub: #1–#11 (except no new Director PR); many contain already-integrated commits despite remaining open. PR status does not establish source integration. Baseline's PR-triggered workflow query returned no runs; this is not a CI pass. See baseline-test-report.md for the executed local gate.",
+              "", "Initial open PRs: #1–#11 (no Director First PR); many contain already-integrated commits. During delivery, DEEPSCOUT PR #12 appeared at 66430342237bb2c96118e9cbb14ff865b713ebcd on research/ds01-deepscout. It shares the baseline but adds 15 independent commits/15 files, is not its ancestor, and is not production-approved. Source inspection found a research namespace collision; KEYSTONE interfaces were moved to chomp/research_interfaces.py. See deepscout-compatibility.md. KEYSTONE PR #13 targets the unchanged baseline. These two new task branches are excluded from the historical ancestry table.",
+              "", "PR status does not establish source integration. Baseline's PR-triggered workflow query returned no runs; this is not a CI pass. See baseline-test-report.md and delivery-status.md for local and remote gates.",
               "", "Reproduce: `python tools/cycle2_audit.py`. Review `git log --all --graph --oneline` and `git diff <branch> <baseline> -- chomp tests` for source details."]
     target = ROOT / "docs/cycle2"
     target.mkdir(parents=True, exist_ok=True)
