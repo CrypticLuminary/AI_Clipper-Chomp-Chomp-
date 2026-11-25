@@ -1,5 +1,6 @@
 """Regression: a valid VFR source must retain video through the cut end."""
 import pytest
+from pathlib import Path
 
 from chomp.manual import render_manual_preview
 from chomp.media import probe
@@ -17,7 +18,7 @@ def test_vfr_video_and_audio_reach_same_source_boundary(tmp_path, temporal):
                 {"start_ms": 3000, "end_ms": 5000, "layout": "gameplay-only"}] if temporal else None
     result = render_manual_preview(source, tmp_path / "export", rights_ref="generated synthetic fixture",
                                    start_s=1, end_s=5, layout="gameplay-only", layout_segments_override=segments)
-    metadata = probe(__import__("pathlib").Path(result["preview"]))
+    metadata = probe(Path(result["preview"]))
     streams = {row["codec_type"]: row for row in metadata["streams"]}
     assert float(streams["video"]["duration"]) == pytest.approx(4, abs=.08)
     assert float(streams["audio"]["duration"]) == pytest.approx(4, abs=.04)
