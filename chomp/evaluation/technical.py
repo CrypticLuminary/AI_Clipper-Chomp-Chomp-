@@ -65,6 +65,11 @@ def inspect_export(source: Path, preview: Path, *, start_ms: int, end_ms: int, a
             "missing_audio": False,
             "expected_source_silence": source_level <= -60, "silent_audio": output_level <= -60,
             "unexpected_silent_audio": source_level > -60 and output_level <= -60,
-            "waveform_correlation": waveform, "envelope_correlation": correlation,
-            "envelope_lag_ms": lag, "stream_start_delta_ms": starts[1] - starts[0],
-            "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."}
+            "measurement_schema": "chomp-export-technical/2",
+            "waveform_correlation": waveform, "audio_envelope_correlation": correlation,
+            "audio_envelope_lag_ms": lag, "container_stream_start_delta_ms": starts[1] - starts[0],
+            "audiovisual_sync_error_ms": None,
+            "alignment_note": "Audio-to-source envelope alignment has 20ms resolution. Container start times do not establish audiovisual synchronization; lip-sync is unmeasured.",
+            "deprecated_aliases": {"envelope_lag_ms": "audio_envelope_lag_ms",
+                                   "envelope_correlation": "audio_envelope_correlation", "stream_start_delta_ms": "container_stream_start_delta_ms"},
+            "envelope_lag_ms": lag, "envelope_correlation": correlation, "stream_start_delta_ms": starts[1]-starts[0]}

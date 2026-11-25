@@ -226,6 +226,22 @@ def benchmark(events_path: Path, ledger_path: Path, *, manifest_path: Path | Non
             "api_cost_per_positive_review": cost / good if complete and good and cost is not None else None,
         })
     selected_hits = [event for event in results if event["selected"]]
+    # Event coverage asks whether any selected clip preserves an event. Clip
+    # coverage asks how each individual export fares, including unmatched ones.
+    selections = []
+    for rank, interval in enumerate(selected):
+        matches = []
+        for event in gold["events"]:
+            if _covers_core(interval, tuple(event["core_ms"])):
+                matches.append({"event_id": event["id"],
+                    "essential_preserved": _contains(interval, tuple(event["essential_ms"])),
+                    "boundaries_accepted": (event["start_range_ms"][0] <= interval[0] <= event["start_range_ms"][1]
+                        and event["end_range_ms"][0] <= interval[1] <= event["end_range_ms"][1])})
+        selections.append({"selected_index": rank, "start_ms": interval[0], "end_ms": interval[1],
+            "matched_event_ids": [m["event_id"] for m in matches],
+            "essential_preserved": any(m["essential_preserved"] for m in matches) if matches else None,
+            "boundaries_accepted": any(m["boundaries_accepted"] for m in matches) if matches else None,
+            "event_matches": matches})
     duplicate_indices = set()
     for event in gold["events"]:
         core = tuple(event["core_ms"])
@@ -257,6 +273,22 @@ def benchmark(events_path: Path, ledger_path: Path, *, manifest_path: Path | Non
         "cache_hit_rate": measured(cache_hits, len(records)) if cache_hits is not None else measured(0, 0),
         **unavailable,
     }
+    matched = [row for row in selections if row["matched_event_ids"]]
+    metrics.update({
+        "event_essential_span_coverage": measured(sum(x["essential_preserved"] for x in selected_hits), len(selected_hits)),
+        "event_acceptable_boundary_rate": measured(sum(x["boundaries_accepted"] for x in selected_hits), len(selected_hits)),
+        "matched_clip_essential_span_coverage": measured(sum(x["essential_preserved"] for x in matched), len(matched)),
+        "matched_clip_acceptable_boundary_rate": measured(sum(x["boundaries_accepted"] for x in matched), len(matched)),
+        "selected_clip_event_match_rate": measured(len(matched), len(selected)) if gold["complete"] else
+            {**measured(len(matched), len(selected)), "value": None, "reason": "incomplete_source_annotations"},
+        "unmatched_selection_rate": measured(len(selected)-len(matched), len(selected)) if gold["complete"] else
+            {**measured(len(selected)-len(matched), len(selected)), "value": None, "reason": "incomplete_source_annotations"},
+        "human_reviewed_coverage": {"value": None, "numerator": None, "denominator": len(selected), "reason": "independent_clip_reviews_not_supplied"},
+        "human_context_completeness": {"value": None, "reason": "independent_context_judgments_not_supplied"},
+    })
+    for alias, replacement in (("setup_payoff_completeness", "event_essential_span_coverage"),
+                               ("acceptable_boundary_rate", "event_acceptable_boundary_rate")):
+        metrics[alias].update(deprecated_alias_for=replacement, unit="annotated_event", basis="temporal_span_coverage_not_contextual_completeness")
     if not gold["complete"] or not count:
         metrics["duplicate_selection_rate"]["value"] = None
         metrics["duplicate_selection_rate"]["reason"] = "insufficient_annotated_event_identity"
@@ -286,20 +318,40 @@ def benchmark(events_path: Path, ledger_path: Path, *, manifest_path: Path | Non
             if any(type(value) is not bool for value in values):
                 raise ClipLedgerError(f"{field} measurements must be boolean or null")
             metrics[field] = measured(sum(values), len(values))
-        lags = [row["envelope_lag_ms"] for row in measured_rows if row.get("envelope_lag_ms") is not None]
+        lags = []
+        for row in measured_rows:
+            value = row.get("audio_envelope_lag_ms", row.get("envelope_lag_ms"))
+            if (row.get("audio_envelope_lag_ms") is not None and row.get("envelope_lag_ms") is not None
+                    and row["audio_envelope_lag_ms"] != row["envelope_lag_ms"]):
+                raise ClipLedgerError("Conflicting old/new audio-envelope alignment measurements")
+            if value is not None:
+                lags.append(value)
         if any(type(value) not in (int, float) or not math.isfinite(value) for value in lags):
-            raise ClipLedgerError("Sync measurements must be finite milliseconds")
-        metrics["av_sync_error_ms"] = {"value": sum(abs(x) for x in lags) / len(lags) if lags else None,
-                                        "denominator": len(lags), "method": "audio_envelope_relative_to_source_20ms"}
+            raise ClipLedgerError("Audio-envelope alignment measurements must be finite milliseconds")
+        metrics["audio_envelope_absolute_lag_ms"] = {"value": sum(abs(x) for x in lags) / len(lags) if lags else None,
+            "denominator": len(lags), "method": "audio_envelope_relative_to_source_20ms", "is_audiovisual_sync": False}
+    metrics.setdefault("audio_envelope_absolute_lag_ms", {"value": None, "denominator": 0, "is_audiovisual_sync": False})
+    metrics["av_sync_error_ms"] = {"value": None, "reason": "actual_audiovisual_synchronization_not_measured",
+                                  "schema_migration": "audio_envelope_absolute_lag_ms_replaces_previous_mislabeled_audio_only_value"}
     if assessments:
         metrics["human_approved_clip_precision"] = [x["metrics"]["precision_at_3"] for x in assessments]
         metrics["selected_clip_precision"] = metrics["human_approved_clip_precision"]
+        metrics["human_reviewed_coverage"] = [{"review_path": item["path"],
+            "numerator": item["metrics"]["review_coverage"]["reviewed"], "denominator": len(selected),
+            "value": item["metrics"]["review_coverage"]["reviewed_rate"],
+            "determinate": item["metrics"]["review_coverage"]["determinate"],
+            "uncertain": item["metrics"]["review_coverage"]["uncertain"]} for item in assessments]
+        metrics["human_context_completeness"] = [{"review_path": item["path"],
+            **item["metrics"]["quality_ratings"]["context_completeness"]} for item in assessments]
     return {
         "schema_version": "chomp-event-benchmark/1", "source_id": source_id, "job_id": ledger["job_id"],
         "benchmark_name": "ChompBench-1", "annotation_origin": gold.get("annotation_origin", "unspecified_legacy"),
         "dataset_split": gold.get("dataset_split"), "analysis_status": ledger.get("analysis_status"),
         "coverage": ledger.get("coverage"), "availability": ledger.get("availability"), "metrics": metrics,
         "complete_source_annotation": gold["complete"], "events": results,
+        "metric_definitions_version": "chompbench-metrics/2", "selected_clip_matches": selections,
+        "matched_selections": len(matched), "unmatched_selections": len(selected)-len(matched),
+        "contextual_completeness_status": "requires_independent_review_and_KR01_KR08_research",
         "annotated_events": count, "discovered_annotated_events": recalled,
         "proposal_recall": recalled / count if gold["complete"] and count else None,
         "selected_count": len(selected), "proposals": len(proposals),
@@ -321,6 +373,10 @@ def markdown_report(result: dict) -> str:
     for name, metric in result["metrics"].items():
         if isinstance(metric, dict):
             lines.append(f"| {name} | {metric.get('value')} | {metric.get('numerator')} | {metric.get('denominator')} |")
+        elif isinstance(metric, list):
+            for i, assessment in enumerate(metric, 1):
+                lines.append(f"| {name} (assessment {i}) | {assessment.get('value', assessment.get('mean_1_to_5'))} | {assessment.get('numerator')} | {assessment.get('denominator', assessment.get('rated'))} |")
     lines += ["", f"Proposals: {result['proposals']}; selected: {result['selected_count']}; processing seconds: {result['processing_seconds']}; provider calls: {result['provider_calls']}; actual API cost: {result['actual_api_cost']}.",
+              f"Matched selections: {result.get('matched_selections')}; unmatched to annotated events: {result.get('unmatched_selections')}. Event and matched-clip denominators differ; temporal coverage does not establish contextual completeness.",
               "", "Null means unavailable or no valid denominator. Synthetic results verify mechanics only. Human review remains pending unless independent clip reviews are supplied."]
     return "\n".join(lines) + "\n"
