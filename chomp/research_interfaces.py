@@ -204,8 +204,13 @@ def retrieve_frames(source: Path, cache: Path, *, start_ms: int, end_ms: int, ti
 
 
 def collect_candidates(lanes: dict[str, list[dict]], evidence: list[dict], *, source_id: str,
-                       duration_ms: int, max_candidates: int = 60) -> dict:
-    """Preserve overlapping proposals and lane-local confidence without ranking."""
+                       duration_ms: int, max_candidates: int = 60,
+                       experimental_lane_order: bool = False) -> dict:
+    """Research-only collection, preserving overlap and uncalibrated confidence.
+
+    Without explicit experimental opt-in, overflow fails instead of silently
+    applying dictionary order as a production allocation/fusion policy.
+    """
     if type(max_candidates) is not int or not 0 <= max_candidates <= 10_000:
         raise ValueError("Invalid candidate budget")
     registry = {}
@@ -233,7 +238,18 @@ def collect_candidates(lanes: dict[str, list[dict]], evidence: list[dict], *, so
             if not any(registry[eid]["start_ms"] < interval[1] and registry[eid]["end_ms"] > interval[0] for eid in refs):
                 raise ValueError("Candidate interval does not overlap its evidence")
             candidates.append({**row, "source_id": source_id, "lanes": [lane]})
+    if len(candidates) > max_candidates and experimental_lane_order is not True:
+        raise ValueError("Candidate budget needs an explicit research allocation policy; lane-order truncation is experimental")
+    retained = candidates[:max_candidates]
+    input_counts = {lane: len(rows) for lane, rows in lanes.items()}
+    retained_counts = {lane: sum(lane in row['lanes'] for row in retained) for lane in lanes}
     return {"schema_version": "chomp-research-candidates/1", "source_id": source_id, "duration_ms": duration_ms,
-            "candidates": candidates[:max_candidates],
-            "omitted_count": max(0, len(candidates) - max_candidates), "policy": "lane_order_only_no_fusion",
+            "candidates": retained,
+            "omitted_count": max(0, len(candidates) - max_candidates), "policy": "experimental_lane_order" if len(candidates) > max_candidates else "collection_only_no_fusion",
+            "experimental": len(candidates) > max_candidates, "production_fusion_enabled": False,
+            "allocation_diagnostics": {"input_by_lane": input_counts, "retained_by_lane": retained_counts,
+                "omitted_by_lane": {lane: input_counts[lane] - retained_counts[lane] for lane in lanes},
+                "completely_excluded_lanes": [lane for lane in lanes if input_counts[lane] and not retained_counts[lane]],
+                "empty_input_lanes": [lane for lane in lanes if not input_counts[lane]],
+                "lane_order": list(lanes), "policy_owner": "DEEPSCOUT; KR-01 through KR-08 research coordination"},
             "confidence_notice": "Provider confidence values are not cross-model calibrated probabilities."}
