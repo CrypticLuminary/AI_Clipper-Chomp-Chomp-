@@ -7,7 +7,6 @@ All listed remote branches are ancestors of this baseline. Source diffs and merg
 
 | Remote branch | Head | Merge base with baseline | Unique to branch / baseline | Changed files |
 |---|---|---|---|---:|
-| origin | `a5eeb4abcf12` | `a5eeb4abcf12` | 0 / 66 | 120 |
 | origin/feat/capt08-gpt6-dev-captioncraft | `515c2d9d940e` | `515c2d9d940e` | 0 / 45 | 113 |
 | origin/feat/director-first | `24bf2f5f4ad2` | `24bf2f5f4ad2` | 0 / 0 | 0 |
 | origin/feat/edit-fx03-shotcomposer | `4acbd67aff25` | `4acbd67aff25` | 0 / 3 | 21 |
@@ -19,7 +18,7 @@ All listed remote branches are ancestors of this baseline. Source diffs and merg
 | origin/fix/voice03-fix01-gflash38-ag-modelpaths | `d713e7532e8c` | `d713e7532e8c` | 0 / 55 | 110 |
 | origin/fix/voice03-fix02-gflash38-ag-identityguard | `4f5b78b4aafd` | `4f5b78b4aafd` | 0 / 55 | 111 |
 | origin/fix/voice03-fix03-gflash38-ag-turnsguard | `ba300264d949` | `ba300264d949` | 0 / 54 | 110 |
-| remotes/origin/integration/integ09-sol61-work-bridge | `1e7e9222cd8e` | `1e7e9222cd8e` | 0 / 12 | 98 |
+| origin/integration/integ09-sol61-work-bridge | `1e7e9222cd8e` | `1e7e9222cd8e` | 0 / 12 | 98 |
 | origin/main | `a5eeb4abcf12` | `a5eeb4abcf12` | 0 / 66 | 120 |
 | origin/work/edit-01-director | `f187fd107ee0` | `f187fd107ee0` | 0 / 10 | 55 |
 | origin/work/edit-fx-01-stablecamera | `220acdba0b4e` | `220acdba0b4e` | 0 / 8 | 50 |

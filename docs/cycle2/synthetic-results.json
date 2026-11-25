@@ -1,0 +1,403 @@
+{
+  "schema_version": "cycle2-observed-results/1",
+  "synthetic": true,
+  "human_quality_conclusion": null,
+  "cases": [
+    {
+      "case": "landscape_speech",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "synthetic speech",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -19.09187180326335,
+          "output_dbfs": -22.114046684535484,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.9999589899691474,
+          "envelope_correlation": 0.9996731211328369,
+          "envelope_lag_ms": 0,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "no_webcam",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "rectangular_corner_webcam",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "webcam_switching_position",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "multiple_visible_faces",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "quiet_speech_then_laughter",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "synthetic speech",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -23.909511863824243,
+          "output_dbfs": -26.92391498719736,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.999929708821749,
+          "envelope_correlation": 0.9994405350149317,
+          "envelope_lag_ms": 0,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "loud_gameplay_no_event",
+      "passed": true,
+      "selected": 0,
+      "audio_semantics": "tone surrogate",
+      "checks": []
+    },
+    {
+      "case": "multiple_speakers",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "synthetic speech",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -19.09187180326335,
+          "output_dbfs": -22.114046684535484,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.9999589899691474,
+          "envelope_correlation": 0.9996731211328369,
+          "envelope_lag_ms": 0,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "silent",
+      "passed": true,
+      "selected": 0,
+      "audio_semantics": "silence",
+      "checks": []
+    },
+    {
+      "case": "nonzero_timestamps",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.071432093751945,
+          "output_dbfs": -24.09456587634702,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.999923458542371,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "multiple_audio_tracks",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 1,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "variable_frame_rate",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "unicode_captions",
+      "passed": true,
+      "selected": 1,
+      "audio_semantics": "tone surrogate",
+      "checks": [
+        {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -21.07127837023475,
+          "output_dbfs": -24.092944405949297,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "waveform_correlation": 0.99991423525061,
+          "envelope_correlation": null,
+          "envelope_lag_ms": null,
+          "stream_start_delta_ms": 0.0,
+          "sync_note": "Envelope lag has 20ms resolution; null for insufficient temporal evidence. Human lip-sync is unmeasured."
+        }
+      ]
+    },
+    {
+      "case": "empty_highlights",
+      "passed": true,
+      "selected": 0,
+      "audio_semantics": "tone surrogate",
+      "checks": []
+    },
+    {
+      "case": "corrupt_media",
+      "passed": true,
+      "selected": 0,
+      "audio_semantics": null,
+      "checks": []
+    }
+  ],
+  "experiments": {
+    "A": {
+      "workflow": "heuristic_production",
+      "budget": {
+        "provider_call_limit": 0,
+        "candidate_limit": null,
+        "inspected_footage_ms": 8000,
+        "available_modalities": [
+          "audio",
+          "transcript"
+        ]
+      },
+      "proposals": 2,
+      "selected": 1,
+      "proposal_recall": 1.0,
+      "provider_calls": 0,
+      "analysis_seconds": 0.692
+    },
+    "B": {
+      "workflow": "semantic_production",
+      "budget": {
+        "provider_call_limit": 12,
+        "candidate_limit": null,
+        "inspected_footage_ms": 8000,
+        "available_modalities": [
+          "audio",
+          "transcript"
+        ]
+      },
+      "proposals": 2,
+      "selected": 1,
+      "proposal_recall": 1.0,
+      "provider_calls": 2,
+      "analysis_seconds": 0.668
+    },
+    "C": {
+      "workflow": "director_first",
+      "budget": {
+        "provider_call_limit": 120,
+        "candidate_limit": null,
+        "inspected_footage_ms": 8000,
+        "available_modalities": [
+          "audio",
+          "transcript"
+        ]
+      },
+      "proposals": 2,
+      "selected": 1,
+      "proposal_recall": 1.0,
+      "provider_calls": 2,
+      "analysis_seconds": 0.164
+    },
+    "D": {
+      "workflow": "integrated_director",
+      "budget": {
+        "provider_call_limit": 120,
+        "candidate_limit": null,
+        "inspected_footage_ms": 8000,
+        "available_modalities": [
+          "audio",
+          "transcript"
+        ]
+      },
+      "proposals": 2,
+      "selected": 1,
+      "proposal_recall": 1.0,
+      "provider_calls": 2,
+      "analysis_seconds": 0.164
+    }
+  },
+  "budgets_matched": false
+}
