@@ -284,7 +284,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--chat", type=Path, help="optional local livestream chat replay for signal discovery")
     parser.add_argument("--audio-stream", type=int, default=0)
     parser.add_argument("--max-calls", type=int, default=120, help="maximum new Codex calls per run")
-    parser.add_argument("--discovery-calls", type=int, help="new scan calls; defaults to total minus final reserve")
+    parser.add_argument("--discovery-calls", type=int, help="new scan calls; defaults to total minus investigation and final reserves")
     parser.add_argument("--investigation-calls", type=int, default=4)
     parser.add_argument("--final-reserve", type=int, default=1)
     parser.add_argument("--provider-timeout", type=float, default=150)

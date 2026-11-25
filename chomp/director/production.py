@@ -13,7 +13,7 @@ from ..captions import build_captions
 from ..editorial_selection import adapt_director_report, span
 from ..editorial import validate_title
 from ..manual import render_manual_preview
-from ..media import check_audio_track, probe
+from ..media import RENDER_VERSION, check_audio_track, probe
 from ..signals import read_transcript
 from .campaign import resolve_campaign
 from .selection import TranscriptIndex, validate_refs
@@ -37,7 +37,8 @@ def _verify_cached_manifest(manifest, *, report, selected, source, transcript, j
         "source": str(source), "duration_ms": report["duration_ms"], "rights_ref": campaign.rights_ref,
         "candidate_count": len(report["candidates"]), "selected_for_review": len(selected),
         "manual_review_required": True, "auto_publishing": False, "review_status": "pending",
-        "director_sha256": config["director_sha256"], "provenance": config}
+        "director_sha256": config["director_sha256"], "provenance": config,
+        "review_manifest": str(job / "review_queue.json"), "review_page": str(job / "review.html")}
     if not isinstance(manifest, dict) or any(manifest.get(k) != v or type(manifest.get(k)) is not type(v)
                                             for k, v in expected_header.items()):
         raise ValueError("Cached Director manifest source, run or counts changed")
@@ -79,7 +80,8 @@ def _verify_cached_manifest(manifest, *, report, selected, source, transcript, j
             raise ValueError("Cached Director manual manifest is outside this job")
         canonical = json.loads(manual_path.read_text(encoding="utf-8"))
         for key in (*expected_clip, "job_id", "artifact_sha256", "preview", "edit_spec", "captions_srt",
-                    "caption_cues", "caption_timing", "layout"):
+                    "caption_cues", "caption_timing", "layout", "title", "title_source", "fit_facecam",
+                    "facecam_roi_px", "gameplay_roi_px", "audio_mean_dbfs", "loudness"):
             if canonical.get(key) != clip.get(key):
                 raise ValueError("Cached Director entry differs from its rendered manual manifest")
         captions = build_captions(segments, left, right, report["duration_ms"])
@@ -181,7 +183,7 @@ def export_selection(report_path: Path, output: Path, *, acknowledge_permission:
         raise ValueError("Layout overrides reference an unselected candidate")
     config = {"director_sha256": digest_file(report_path), "layout": layout, "profile": profile,
               "layout_plans": {cid: digest_file(path) for cid, path in plans.items()},
-              "bridge_version": 2, "allow_partial": allow_partial}
+              "bridge_version": 2, "render_version": RENDER_VERSION, "allow_partial": allow_partial}
     job = output.resolve() / ("director-" + artifact_key(config)[:24])
     job.mkdir(parents=True, exist_ok=True)
     manifest_path = job / "review_queue.json"

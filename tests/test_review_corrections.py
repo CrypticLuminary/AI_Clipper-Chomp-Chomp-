@@ -176,6 +176,9 @@ def rendered_cache(tmp_path):
     lambda m: m["clips"][0]["artifact_sha256"].update(captions_srt=None),
     lambda m: m["clips"][0].update(audio_stream=1),
     lambda m: m.update(campaign={}),
+    lambda m: m.update(review_page="elsewhere.html"),
+    lambda m: m.update(review_manifest="elsewhere.json"),
+    lambda m: m["clips"][0].update(title="Unrelated cached title"),
 ])
 def test_cached_export_rejects_missing_duplicate_and_modified_manifest_entries(rendered_cache, mutation):
     report, out, manifest = rendered_cache
