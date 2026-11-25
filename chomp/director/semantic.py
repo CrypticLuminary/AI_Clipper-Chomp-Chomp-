@@ -78,15 +78,22 @@ class BudgetPolicy:
             raise ValueError("max_calls must be between 1 and 300")
         if any(type(x) is not int or x < 0 for x in (self.discovery_calls, self.investigation_calls, self.final_reserve)):
             raise ValueError("Phase call limits must be nonnegative integers")
-        if self.discovery_calls + self.final_reserve > total:
-            raise ValueError("Discovery capacity must leave the final decision reserve")
+        if self.final_reserve < 1 or self.discovery_calls + self.investigation_calls + self.final_reserve > total:
+            raise ValueError("Discovery capacity must leave both investigation and final decision reserves")
         if not 0 < self.call_timeout_seconds <= 300 or not 0 < self.runtime_seconds <= 7200:
             raise ValueError("Invalid provider timeout/runtime limits")
 
     @classmethod
-    def for_total(cls, total: int):
-        reserve = int(total > 1)
-        return cls(total - reserve, final_reserve=reserve)
+    def for_total(cls, total: int, *, investigation_calls: int = 4, final_reserve: int = 1):
+        if type(total) is not int or not 1 <= total <= 300:
+            raise ValueError("max_calls must be between 1 and 300")
+        if type(investigation_calls) is not int or investigation_calls < 0 or type(final_reserve) is not int or final_reserve < 1:
+            raise ValueError("Investigation must be nonnegative and final reserve must be positive")
+        reserve = min(final_reserve, total)
+        # On tiny budgets, retain one discovery call when possible, then
+        # allocate bounded context reads. The final response is always kept.
+        investigation = min(investigation_calls, max(0, total - reserve - 1))
+        return cls(total - reserve - investigation, investigation, reserve)
 
 
 class EditorialCalls:

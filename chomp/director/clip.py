@@ -306,9 +306,12 @@ def main(argv: list[str]) -> int:
             "preferred_topics", "excluded_topics", "captions")})
         section = tuple(map(milliseconds, args.section)) if args.section else None
         provider = CodexCLI(args.model, effort="low") if args.model else None
-        reserve = min(args.final_reserve, args.max_calls - 1)
-        policy = BudgetPolicy(args.discovery_calls if args.discovery_calls is not None else args.max_calls - reserve,
-                              args.investigation_calls, reserve, args.provider_timeout)
+        policy = BudgetPolicy.for_total(args.max_calls, investigation_calls=args.investigation_calls,
+                                        final_reserve=args.final_reserve)
+        policy = replace(policy, call_timeout_seconds=args.provider_timeout)
+        if args.discovery_calls is not None:
+            policy = replace(policy, discovery_calls=args.discovery_calls)
+        policy.validate(args.max_calls)
         report = run_clip(args.source, args.output, campaign, provider=provider, section=section,
                           transcript_path=args.transcript, chat_path=args.chat, asr_model=args.asr_model,
                           audio_stream=args.audio_stream, max_calls=args.max_calls, include_rejected=args.include_rejected,
