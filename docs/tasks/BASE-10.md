@@ -7,3 +7,5 @@
 - Working branch: work/cycle2-keystone, new isolated worktree. No edits to shared attribution registry.
 - Baseline: 323 tests passed. See ../cycle2/branch-audit.md, baseline-test-report.md and module-map.md.
 - Stage acceptance and final revision: see ../cycle2/final-engineering-report.md and `git log work/cycle2-keystone`.
+
+BASE-10-R1 continues on the same branch/PR #13 from independently reviewed `c467fe2`. Corrections, schema migration, actual test results and fresh private review delivery are recorded in ../cycle2/review-corrections.md. This follow-up preserves KR-01–KR-08 semantic/context research ownership and performs no paid model invocation or large-scale training.
