@@ -14,19 +14,20 @@ def git(*args):
 
 def main():
     base = "24bf2f5f4ad2172e4b18728b198fe7d3e9d65aff"
-    refs = git("for-each-ref", "--format=%(refname:short)", "refs/remotes/origin").splitlines()
+    refs = git("for-each-ref", "--format=%(refname)", "refs/remotes/origin").splitlines()
     lines = ["# Cycle 2 branch audit", "", "Audit date: 2026-11-25 (Asia/Katmandu). `git fetch origin --prune` succeeded.",
              "", f"Authoritative baseline: `feat/director-first` at `{base}`.",
              "All listed remote branches are ancestors of this baseline. Source diffs and merge bases confirm that the camera, cutout, caption, evaluation, boundary and diarization fixes are integrated; no cherry-picks are needed.",
              "", "| Remote branch | Head | Merge base with baseline | Unique to branch / baseline | Changed files |", "|---|---|---|---|---:|"]
     for ref in refs:
-        if ref == "origin/HEAD":
+        if ref.endswith("/HEAD"):
             continue
         head = git("rev-parse", ref)
         common = git("merge-base", ref, base)
         counts = git("rev-list", "--left-right", "--count", f"{ref}...{base}").split()
         changed = git("diff", "--name-only", ref, base).splitlines()
-        lines.append(f"| {ref} | `{head[:12]}` | `{common[:12]}` | {' / '.join(counts)} | {len(changed)} |")
+        label = ref.removeprefix("refs/remotes/")
+        lines.append(f"| {label} | `{head[:12]}` | `{common[:12]}` | {' / '.join(counts)} | {len(changed)} |")
     lines += ["", "Dependency chain: foundation → Bridge integration (merges CUT-06, CAPT-08, EVAL-07 and VOICE-03 fixes) → Stage 1 quality → EDIT-01 → stable camera → SubjectLock → ShotComposer → transparent cutout → Director First.",
               "", "The local foundation worktree is behind its remote. A local branch named `origin/integration/integ09-sol61-work-bridge` shadows the remote's short name; audit uses `refs/remotes/origin/...` when ambiguity matters. Existing worktrees and local changes were left untouched.",
               "", "No unresolved merge conflicts exist in the new worktree. Semantic production and Director First are divergent workflows, addressed through an opt-in validated renderer bridge; existing experimental components remain available.",

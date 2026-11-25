@@ -55,7 +55,7 @@ jobs:
             throw 'FFmpeg must provide the subtitles filter (libass)'
           }
       - name: Install application and test dependencies (no ASR model download)
-        run: python -m pip install -e ".[dev,director]"
+        run: python -m pip install -e ".[dev,director,facecam]"
       - name: Verify package, dependencies and syntax
         run: |
           python -m pip check
@@ -63,3 +63,5 @@ jobs:
           chomp --help
       - name: Run offline unit and FFmpeg integration tests
         run: python -m pytest -q -ra
+      - name: Run Cycle 2 synthetic export and benchmark matrix
+        run: python -m chomp.evaluation.smoke --out outputs/ci-cycle2-smoke

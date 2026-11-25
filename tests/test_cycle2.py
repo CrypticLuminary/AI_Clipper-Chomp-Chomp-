@@ -343,3 +343,28 @@ def test_benchmark_rejects_wrong_technical_intervals(tmp_path):
     write_json(root / "wrong-technical.json", measurement)
     with pytest.raises(ValueError, match="interval/identity"):
         benchmark(root / "events.json", Path(result["cases"][0]["director_report"]), technical_path=root / "wrong-technical.json")
+
+
+@needs_ffmpeg
+def test_interrupted_export_resumes_and_corrupt_cached_artifacts_fail_closed(tmp_path, monkeypatch):
+    from chomp.director import production
+    source = vod(tmp_path / "source.mp4", duration=8)
+    report = run_clip(source, tmp_path / "analysis", fixture_campaign(), provider=ScriptedDirector(),
+                      transcript_path=fixture_transcript(tmp_path / "words.json"))
+    original_write = production.write_json
+    def interrupted(path, data, **kwargs):
+        if path.name == "review_queue.json":
+            raise OSError("simulated interruption before final manifest")
+        return original_write(path, data, **kwargs)
+    monkeypatch.setattr(production, "write_json", interrupted)
+    kwargs = dict(acknowledge_permission=True, layout="gameplay-only")
+    with pytest.raises(OSError, match="simulated interruption"):
+        export_selection(Path(report["job_report"]), tmp_path / "export", **kwargs)
+    [media] = list((tmp_path / "export").rglob("*.mp4"))
+    before = digest_file(media)
+    monkeypatch.setattr(production, "write_json", original_write)
+    completed = export_selection(Path(report["job_report"]), tmp_path / "export", **kwargs)
+    assert digest_file(media) == before and completed["selected_for_review"] == 1
+    media.write_bytes(b"corrupted after export")
+    with pytest.raises(ValueError, match="changed"):
+        export_selection(Path(report["job_report"]), tmp_path / "export", **kwargs)

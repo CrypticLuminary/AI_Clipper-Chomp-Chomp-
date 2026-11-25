@@ -34,6 +34,13 @@ def compare_experiments(path: Path) -> dict:
             raise ClipLedgerError("Experiment annotation fingerprint mismatch")
         ledger_path = local(row["candidates"])
         ledger = read_selection(json.loads(ledger_path.read_text(encoding="utf-8-sig")))
+        director = ledger.get("director_report")
+        if director and director.get("campaign", {}).get("rights_ref") != row["rights_reference"]:
+            raise ClipLedgerError("Experiment rights do not match the Director campaign")
+        if row.get("manifest"):
+            manifest = json.loads(local(row["manifest"]).read_text(encoding="utf-8-sig"))
+            if manifest.get("rights_ref") != row["rights_reference"]:
+                raise ClipLedgerError("Experiment rights do not match the production manifest")
         key = (ledger["source_id"], ledger["duration_ms"], row["rights_reference"], row["protocol_id"])
         if identity is not None and key != identity:
             raise ClipLedgerError("Experiments must use the same source, rights and protocol")

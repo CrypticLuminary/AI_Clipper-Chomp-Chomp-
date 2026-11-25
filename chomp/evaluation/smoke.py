@@ -12,7 +12,7 @@ from ..director.production import export_selection
 from ..director.provider import Response
 from ..media import exec_checked, probe
 from ..pipeline import process
-from .benchmark import benchmark, markdown_report
+from .benchmark import benchmark, markdown_report, validate_dataset
 from .experiments import VARIANTS, compare_experiments
 from .technical import inspect_export
 
@@ -77,6 +77,10 @@ def make_fixture(root: Path, name: str) -> tuple[Path, Path, dict]:
         video += "," + ",".join(shapes)
     if name == "variable_frame_rate":
         video += ",select='lt(t,4)+not(mod(n,3))'"
+    # Distinct byte/content identities keep source registration honest even
+    # when two fixtures otherwise share the same tone and visual test pattern.
+    marker_x = 10 + CASES.index(name) * 25
+    video += f",drawbox=x={marker_x}:y=258:w=12:h=10:color=white:t=fill"
     silent = name == "silent"
     filters = exec_checked(["ffmpeg", "-hide_banner", "-filters"], timeout=10).stdout
     has_flite = " flite " in filters
@@ -111,15 +115,15 @@ def make_fixture(root: Path, name: str) -> tuple[Path, Path, dict]:
         "audio_semantics": "synthetic speech" if speech_synthesized else "silence" if silent else "tone surrogate"}
 
 
-def event_annotations(source_id, duration, *, positive=True):
+def event_annotations(source_id, duration, *, positive=True, split="development"):
     event = {"id": "synthetic-event", "event_description": "Scripted test event", "highlight_category": "synthetic",
              "core_ms": [3000, 4000], "essential_ms": [1000, 5000], "start_range_ms": [0, 1000],
              "end_range_ms": [5000, 6000], "required_audio_evidence": [], "required_visual_evidence": [],
              "necessary_context": "Synthetic setup", "viewer_value": "Technical verification only",
              "reviewer_id": "synthetic-generator", "review_status": "reviewed"}
     return {"schema_version": "chomp-source-events/1", "benchmark_name": "ChompBench-1", "source_id": source_id,
-            "duration_ms": duration, "creator_id": "synthetic-development", "content_category": "synthetic",
-            "rights_reference": "generated synthetic fixture", "dataset_split": "development",
+            "duration_ms": duration, "creator_id": f"synthetic-{split}", "content_category": "synthetic",
+            "rights_reference": "generated synthetic fixture", "dataset_split": split,
             "annotation_completeness": "complete", "annotation_origin": "synthetic", "complete": True,
             "reviewer": "synthetic-generator (not a human)", "events": [event] if positive else []}
 
@@ -129,6 +133,7 @@ def run_smoke(root: Path, cases=CASES) -> dict:
         raise FileExistsError("Choose a fresh smoke directory; existing media and reports are preserved")
     root.mkdir(parents=True)
     results = []
+    dataset = []
     for name in cases:
         folder = root / name
         source, transcript, info = make_fixture(folder, name)
@@ -167,7 +172,11 @@ def run_smoke(root: Path, cases=CASES) -> dict:
                           "-vf", "fps=1,scale=180:320,tile=4x1", "-frames:v", "1", str(folder / "contact-sheet.png")])
         assert len(exported["clips"]) == int(info["positive"])
         annotations = folder / "events.json"
-        write_json(annotations, event_annotations(report["source_id"], report["duration_ms"], positive=info["positive"]))
+        split = "holdout" if name in {"no_webcam", "multiple_visible_faces"} else "development"
+        gold = event_annotations(report["source_id"], report["duration_ms"], positive=info["positive"], split=split)
+        write_json(annotations, gold)
+        dataset.append({key: gold[key] for key in ("source_id", "creator_id", "content_category", "duration_ms",
+                                                   "rights_reference", "dataset_split")})
         technical_path = folder / "technical.json"
         write_json(technical_path, {"schema_version": "chompbench-technical/1", "source_id": report["source_id"],
             "job_id": report["job_id"], "duration_ms": report["duration_ms"], "clips": [
@@ -187,7 +196,8 @@ def run_smoke(root: Path, cases=CASES) -> dict:
                                audio_stream=info["audio_stream"])
             runs = {}
             for key, manifest, ledger in (
-                ("A", None, baseline["candidate_ledger"]), ("B", None, semantic["candidate_ledger"]),
+                ("A", str(Path(baseline["candidate_ledger"]).with_name("review_queue.json")), baseline["candidate_ledger"]),
+                ("B", str(Path(semantic["candidate_ledger"]).with_name("review_queue.json")), semantic["candidate_ledger"]),
                 ("C", None, report["job_report"]), ("D", exported["review_manifest"], exported["candidate_ledger"])):
                 runs[key] = {"workflow": VARIANTS[key], "candidates": str(Path(ledger).resolve()), "manifest": manifest,
                              "rights_reference": campaign.rights_ref, "protocol_id": "synthetic-cycle2-v1",
@@ -201,6 +211,10 @@ def run_smoke(root: Path, cases=CASES) -> dict:
     result = {"schema_version": "chomp-cycle2-smoke/1", "synthetic": True, "human_review_status": "pending",
               "cases": results, "passed": len(results), "quality_claim": None}
     write_json(root / "smoke-report.json", result)
+    # Synthetic split mechanics only, never an unseen real-creator quality set.
+    registration = {"schema_version": "chompbench-dataset/1", "sources": dataset, "annotation_origin": "synthetic"}
+    validate_dataset(registration)
+    write_json(root / "dataset.json", registration)
     return result
 
 
