@@ -8,6 +8,8 @@ from pathlib import Path
 
 from ..artifacts import artifact_key, artifact_lock, digest_file, source_identity, write_json, write_text
 from ..clipwork import SCHEMA
+from ..clipwork import PROFILES
+from ..captions import build_captions
 from ..editorial_selection import adapt_director_report, span
 from ..editorial import validate_title
 from ..manual import render_manual_preview
@@ -21,10 +23,93 @@ from .semantic import enforce
 def _verify_artifacts(clip):
     for field in ("preview", "edit_spec", "captions_srt"):
         path, expected = clip.get(field), clip.get("artifact_sha256", {}).get(field)
+        if path and not Path(path).is_file():
+            raise ValueError("Director review export is missing an output artifact")
         if path and (not expected or digest_file(Path(path)) != expected):
             raise ValueError("Existing Director export changed; use a new output directory")
         if field in {"preview", "edit_spec"} and not path:
             raise ValueError("Director review export is missing an output artifact")
+
+
+def _verify_cached_manifest(manifest, *, report, selected, source, transcript, job, config, campaign, ledger):
+    """Reconcile the complete cache against verified controller inputs, not itself."""
+    expected_header = {"schema_version": SCHEMA, "job_id": report["job_id"], "source_id": report["source_id"],
+        "source": str(source), "duration_ms": report["duration_ms"], "rights_ref": campaign.rights_ref,
+        "candidate_count": len(report["candidates"]), "selected_for_review": len(selected),
+        "manual_review_required": True, "auto_publishing": False, "review_status": "pending",
+        "director_sha256": config["director_sha256"], "provenance": config}
+    if not isinstance(manifest, dict) or any(manifest.get(k) != v or type(manifest.get(k)) is not type(v)
+                                            for k, v in expected_header.items()):
+        raise ValueError("Cached Director manifest source, run or counts changed")
+    if artifact_key(manifest.get("campaign")) != artifact_key(asdict(campaign)):
+        raise ValueError("Cached Director campaign changed")
+    if Path(manifest.get("candidate_ledger", "")).resolve() != job / "candidates.json":
+        raise ValueError("Cached Director ledger path changed")
+    if json.loads((job / "candidates.json").read_text(encoding="utf-8")) != ledger:
+        raise ValueError("Cached Director candidate ledger changed")
+    clips = manifest.get("clips")
+    if not isinstance(clips, list) or len(clips) != len(selected):
+        raise ValueError("Cached Director manifest is missing or adding selected clips")
+    by_id = {row["candidate_id"]: row for row in selected}
+    seen = set()
+    segments = read_transcript(transcript, report["duration_ms"]) if campaign.captions else []
+    for clip in clips:
+        if not isinstance(clip, dict):
+            raise ValueError("Cached Director clip must be an object")
+        cid = clip.get("candidate_id")
+        if not isinstance(cid, str) or cid not in by_id or cid in seen:
+            raise ValueError("Cached Director clip identity is missing, duplicated or unselected")
+        seen.add(cid)
+        row = by_id[cid]
+        left, right = row["boundary"]["start_ms"], row["boundary"]["end_ms"]
+        expected_clip = {"source_id": report["source_id"], "source": str(source), "start_ms": left,
+            "end_ms": right, "duration_ms": right-left, "source_duration_ms": report["duration_ms"],
+            "audio_stream": report["audio_stream"], "rights_ref": campaign.rights_ref,
+            "manual_review_required": True, "publish_status": "disabled", "review_status": "pending"}
+        if any(clip.get(k) != v or type(clip.get(k)) is not type(v) for k, v in expected_clip.items()):
+            raise ValueError("Cached Director clip source, interval, track or review state changed")
+        candidate = clip.get("candidate")
+        if not isinstance(candidate, dict) or any(candidate.get(k) != v or type(candidate.get(k)) is not int
+                for k,v in {"start_ms": left,"end_ms": right,"anchor_ms": (left+right)//2}.items()):
+            raise ValueError("Cached Director candidate interval changed")
+        if clip.get("editorial") != row:
+            raise ValueError("Cached Director editorial decision changed")
+        manual_path = Path(clip.get("review_manifest", "")).resolve()
+        if not manual_path.is_relative_to(job) or manual_path.name != "manual_review.json":
+            raise ValueError("Cached Director manual manifest is outside this job")
+        canonical = json.loads(manual_path.read_text(encoding="utf-8"))
+        for key in (*expected_clip, "job_id", "artifact_sha256", "preview", "edit_spec", "captions_srt",
+                    "caption_cues", "caption_timing", "layout"):
+            if canonical.get(key) != clip.get(key):
+                raise ValueError("Cached Director entry differs from its rendered manual manifest")
+        captions = build_captions(segments, left, right, report["duration_ms"])
+        if campaign.captions and not captions.count:
+            raise ValueError("Required Director captions cannot be generated")
+        if type(clip.get("caption_cues")) is not int or clip["caption_cues"] != captions.count:
+            raise ValueError("Cached Director caption requirements changed")
+        hashes = clip.get("artifact_sha256")
+        if not isinstance(hashes, dict):
+            raise ValueError("Cached Director artifact hashes are missing")
+        for field, name in (("preview", "manual_preview.mp4"), ("edit_spec", "manual_preview.edit.json"),
+                            ("captions_srt", "manual_preview.srt")):
+            path = clip.get(field)
+            if field == "captions_srt" and not captions.count:
+                if path is not None or hashes.get(field) is not None:
+                    raise ValueError("Unexpected cached Director captions")
+                continue
+            if not isinstance(path, str) or Path(path).resolve() != manual_path.parent / name:
+                raise ValueError("Cached Director expected artifact path is missing or modified")
+        _verify_artifacts(clip)
+        edit = json.loads(Path(clip["edit_spec"]).read_text(encoding="utf-8"))
+        width, height = PROFILES[config["profile"]]
+        expected_edit = {"schema_version": SCHEMA, "source_id": report["source_id"], "source": str(source),
+                         "source_start_ms": left, "source_end_ms": right, "audio_stream": report["audio_stream"],
+                         "width": width, "height": height, "profile": config["profile"], "rights_ref": campaign.rights_ref}
+        if any(edit.get(k) != v for k,v in expected_edit.items()):
+            raise ValueError("Cached Director edit spec differs from the verified source interval/profile")
+        if captions.count and (Path(clip["captions_srt"]).read_text(encoding="utf-8") != captions.text or
+                               edit.get("captions_sha256") != hashes.get("captions_srt")):
+            raise ValueError("Cached Director caption content changed")
 
 
 def verify_selection(report: dict, source: Path, transcript: Path) -> tuple[dict, object]:
@@ -96,15 +181,15 @@ def export_selection(report_path: Path, output: Path, *, acknowledge_permission:
         raise ValueError("Layout overrides reference an unselected candidate")
     config = {"director_sha256": digest_file(report_path), "layout": layout, "profile": profile,
               "layout_plans": {cid: digest_file(path) for cid, path in plans.items()},
-              "bridge_version": 1, "allow_partial": allow_partial}
+              "bridge_version": 2, "allow_partial": allow_partial}
     job = output.resolve() / ("director-" + artifact_key(config)[:24])
     job.mkdir(parents=True, exist_ok=True)
     manifest_path = job / "review_queue.json"
     with artifact_lock(job / ".render.lock", timeout=5):
         if manifest_path.is_file():
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-            for clip in existing["clips"]:
-                _verify_artifacts(clip)
+            _verify_cached_manifest(existing, report=report, selected=selected, source=source,
+                transcript=transcript_path, job=job, config=config, campaign=campaign, ledger=ledger)
             return {**existing, "reused_job": True}
         clips = []
         for row in selected:
@@ -132,7 +217,7 @@ def export_selection(report_path: Path, output: Path, *, acknowledge_permission:
             clips.append({**clip, "candidate_id": row["candidate_id"], "candidate": candidate,
                           "editorial": row, "review_status": "pending"})
         manifest = {"schema_version": SCHEMA, "job_id": report["job_id"],
-                    **{k: report[k] for k in ("source", "source_id", "duration_ms")},
+                    **{k: report[k] for k in ("source_id", "duration_ms")}, "source": str(source),
                     "rights_ref": campaign.rights_ref, "clips": clips, "candidate_count": len(report["candidates"]),
                     "selected_for_review": len(clips), "manual_review_required": True, "auto_publishing": False,
                     "review_status": "pending", "director_report": str(report_path.resolve()),
@@ -140,6 +225,8 @@ def export_selection(report_path: Path, output: Path, *, acknowledge_permission:
                     "coverage": report.get("coverage"), "provenance": config, "campaign": asdict(campaign),
                     "review_page": str(job / "review.html"), "review_manifest": str(manifest_path)}
         write_json(job / "candidates.json", ledger)
+        _verify_cached_manifest(manifest, report=report, selected=selected, source=source,
+            transcript=transcript_path, job=job, config=config, campaign=campaign, ledger=ledger)
         # Each manual job owns its media files; links include their relative directory.
         from html import escape
         cards = []
