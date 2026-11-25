@@ -1,6 +1,7 @@
 """Exhaustive dialogue discovery and a bounded, read-only editorial investigation."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Callable, Protocol
@@ -63,16 +64,50 @@ class DirectorFailure(RuntimeError):
         self.status = status
 
 
+@dataclass(frozen=True)
+class BudgetPolicy:
+    """Infrastructure limits; discovery ordering remains a research decision."""
+    discovery_calls: int
+    investigation_calls: int = 4
+    final_reserve: int = 1
+    call_timeout_seconds: float = 150
+    runtime_seconds: float = 1800
+
+    def validate(self, total: int) -> None:
+        if type(total) is not int or not 1 <= total <= 300:
+            raise ValueError("max_calls must be between 1 and 300")
+        if any(type(x) is not int or x < 0 for x in (self.discovery_calls, self.investigation_calls, self.final_reserve)):
+            raise ValueError("Phase call limits must be nonnegative integers")
+        if self.discovery_calls + self.final_reserve > total:
+            raise ValueError("Discovery capacity must leave the final decision reserve")
+        if not 0 < self.call_timeout_seconds <= 300 or not 0 < self.runtime_seconds <= 7200:
+            raise ValueError("Invalid provider timeout/runtime limits")
+
+    @classmethod
+    def for_total(cls, total: int):
+        reserve = int(total > 1)
+        return cls(total - reserve, final_reserve=reserve)
+
+
 class EditorialCalls:
-    def __init__(self, provider: SelectionProvider, cache: Path, source_id: str, *, max_calls: int):
+    def __init__(self, provider: SelectionProvider, cache: Path, source_id: str, *, max_calls: int,
+                 policy: BudgetPolicy | None = None):
         self.provider = provider
         self.fingerprint = provider.fingerprint
         self.cache = cache
         self.source_id = source_id
         self.max_calls = max_calls
-        self.deadline = monotonic() + 1800
+        self.policy = policy or BudgetPolicy.for_total(max_calls)
+        self.policy.validate(max_calls)
+        self.deadline = monotonic() + self.policy.runtime_seconds
         self.sent = 0
+        self.phase_sent = {"scan": 0, "decide": 0}
         self.records: list[dict] = []
+
+    @property
+    def decision_capacity(self) -> int:
+        return min(self.max_calls - self.sent,
+                   self.policy.investigation_calls + max(1, self.policy.final_reserve) - self.phase_sent["decide"])
 
     def call(self, phase: str, instruction: str, payload: dict, schema: dict, validate: Callable[[dict], None]) -> dict:
         prompt = POLICY + instruction + "\nEvidence and campaign JSON\n" + json_text(payload)
@@ -91,8 +126,22 @@ class EditorialCalls:
                     remaining = self.deadline - monotonic()
                     if self.sent >= self.max_calls or remaining <= 0:
                         raise DirectorFailure("budget_exhausted", "Director call or runtime budget exhausted.")
+                    if phase == "scan" and self.phase_sent["scan"] >= self.policy.discovery_calls:
+                        raise DirectorFailure("discovery_budget_exhausted", "Discovery limit reached; final capacity remains reserved.")
+                    if phase == "decide" and self.decision_capacity <= 0:
+                        raise DirectorFailure("investigation_budget_exhausted", "Editorial investigation call limit reached.")
                     self.sent += 1
-                    response = self.provider.complete_structured(prompt, schema, timeout=remaining)
+                    self.phase_sent[phase] += 1
+                    began = monotonic()
+                    try:
+                        response = self.provider.complete_structured(prompt, schema,
+                                                                     timeout=min(remaining, self.policy.call_timeout_seconds))
+                    except TimeoutError as exc:
+                        raise DirectorFailure("timeout", "Provider timed out; validated earlier phases can be resumed.") from exc
+                    except (OSError, RuntimeError) as exc:
+                        raise DirectorFailure("provider_error", "Provider failed; validated earlier phases can be resumed.") from exc
+                    finally:
+                        report["elapsed_seconds"] = round(monotonic() - began, 3)
                     report["usage"] = response.usage
                     if response.status != "response_received":
                         guidance = {
@@ -114,6 +163,8 @@ class EditorialCalls:
             if not report["cached"]:
                 write_json(path, result)
             report["status"] = "ok"
+            if phase == "decide":
+                report["purpose"] = "investigation" if result["requests"] else "final_decision"
             return result
 
 
@@ -181,7 +232,7 @@ def investigate(calls: EditorialCalls, index: TranscriptIndex, section: tuple[in
     def validate(result: dict) -> None:
         if result["requests"] and result["decisions"]:
             raise ValueError("Evidence requests and final decisions must be returned in separate turns")
-        if len(result["requests"]) > MAX_REQUESTS - len(inspected):
+        if len(result["requests"]) > reads:
             raise DirectorFailure("investigation_budget_exhausted", "Director exceeded the transcript retrieval limit.")
         remaining = remaining_ms
         ranges = {(item["start_ms"], item["end_ms"]) for item in inspected}
@@ -211,10 +262,14 @@ def investigate(calls: EditorialCalls, index: TranscriptIndex, section: tuple[in
                 has_text(row["event"], row["viewer_value"], row["audience"], row["campaign_fit"])
 
     while True:
+        reads = MAX_REQUESTS - len(inspected)
+        # The final available response must decide/abstain, not request another read.
+        if calls.decision_capacity <= max(1, calls.policy.final_reserve):
+            reads = 0
         result = calls.call("decide", DECIDE, {
             "campaign": model_campaign, "section_ms": section, "candidates": candidates,
             "utterances": index.rows([uid for uid in index.ids if uid in initial_ids]),
-            "retrieved": inspected, "remaining_reads": MAX_REQUESTS - len(inspected),
+            "retrieved": inspected, "remaining_reads": reads,
             "remaining_inspected_ms": remaining_ms, "maximum_ms_per_read": 60_000,
         }, DECISION_SCHEMA, validate)
         if not result["requests"]:
