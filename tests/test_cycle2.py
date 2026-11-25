@@ -16,8 +16,8 @@ from chomp.editorial_selection import adapt_director_report
 from chomp.evaluation.benchmark import benchmark, validate_dataset, validate_events
 from chomp.evaluation.core import read_manifest
 from chomp.evaluation.technical import inspect_export
-from chomp.research import collect_candidates, evidence_item, semantic_audio, validate_evidence
-from chomp.research import retrieve_frames, RetrievalBudget, sample_times
+from chomp.research_interfaces import collect_candidates, evidence_item, semantic_audio, validate_evidence
+from chomp.research_interfaces import retrieve_frames, RetrievalBudget, sample_times
 from test_stage1_integration import ffmpeg, needs_ffmpeg, vod
 
 
