@@ -2,6 +2,8 @@
 
 ChompBench-1 extends `chomp.evaluation.benchmark` and ClipLedger. It accepts `chomp-candidates/1` or `director-selection/1`; it does not create a competing annotation system. Reports retain `chomp-event-benchmark/1` with additive fields. Old source-event files remain valid.
 
+BASE-10-R1 uses metric definitions v2: event-level temporal coverage, individual matched-clip coverage, unmatched selections and independent human-reviewed coverage are separate. Actual audiovisual synchronization stays null; audio-to-source envelope alignment has its own name. See benchmark-metrics.md for deprecated aliases/migration and review-corrections.md for actual tests.
+
 Create a reproducible technical development set (Windows or Linux, with the project installed and FFmpeg/FFprobe on PATH):
 
 ```text
