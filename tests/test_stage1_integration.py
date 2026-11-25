@@ -173,9 +173,14 @@ def test_diarization_and_transcript_reach_render_and_review(tmp_path, monkeypatc
 @needs_ffmpeg
 def test_diarization_round_trip_uses_source_clock_with_delayed_audio(tmp_path, monkeypatch):
     source = vod(tmp_path / "delayed audio.mp4", duration=4, audio_delay=1.25)
+    source_duration_ms = probe(source)["duration_ms"]
+    # FFmpeg 9.1 reports 4002 ms due to AAC packet rounding. The turn must
+    # round-trip exactly on the probed source clock, not the encode -t value.
+    assert 4000 <= source_duration_ms <= 4022  # one AAC packet at 48 kHz
     monkeypatch.setattr(core, "sherpa_onnx", object())
 
     def diarize_fixture(wav_path, duration_ms, _config):
+        assert duration_ms == source_duration_ms
         with wave.open(str(wav_path), "rb") as audio:
             assert audio.getframerate() == 16000
             assert rms_dbfs(audio.readframes(8000)) < -80
@@ -185,7 +190,7 @@ def test_diarization_round_trip_uses_source_clock_with_delayed_audio(tmp_path, m
 
     monkeypatch.setattr("chomp.diarization.integration.diarize_audio", diarize_fixture)
     _, turns, _ = diarization.diarize_and_export(source, tmp_path / "speaker data")
-    assert read_speaker_turns(turns, probe(source)["duration_ms"]) == [SpeakerTurn(2000, 4000, "SPEAKER_00")]
+    assert read_speaker_turns(turns, source_duration_ms) == [SpeakerTurn(2000, source_duration_ms, "SPEAKER_00")]
     assert scan_audio(source)[0] < -80
 
 

@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 import sys
 
-from .benchmark import benchmark, create_event_template
+from .benchmark import benchmark, create_event_template, markdown_report, validate_dataset, validate_events
+from ..artifacts import write_json as artifact_json, write_text as artifact_text
 from .core import (
     ClipLedgerError, compare, evaluate, make_template, read_annotations,
     read_manifest, write_json,
@@ -63,6 +64,15 @@ def main(argv: list[str] | None = None) -> int:
     bench.add_argument("--events", type=Path, required=True)
     bench.add_argument("--manifest", type=Path)
     bench.add_argument("--reviews", type=Path, action="append", default=[])
+    bench.add_argument("--technical", type=Path, help="source/run-bound decoded technical measurements")
+    bench.add_argument("--out", type=Path, help="new JSON report; never overwrites inputs or existing files")
+    bench.add_argument("--markdown", type=Path, help="new readable report")
+    for name in ("events-validate", "dataset-validate"):
+        command = cmds.add_parser(name)
+        command.add_argument("path", type=Path)
+    experiments = cmds.add_parser("compare-experiments", help="Matched A/B/C/D run comparison")
+    experiments.add_argument("--config", type=Path, required=True)
+    experiments.add_argument("--out", type=Path, required=True)
 
     args = parser.parse_args(argv)
     try:
@@ -121,8 +131,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Source-event template written to {args.out}")
         elif args.command == "benchmark":
             result = benchmark(args.events, args.candidates, manifest_path=args.manifest,
-                               reviews=tuple(args.reviews))
-            print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+                               reviews=tuple(args.reviews), technical_path=args.technical)
+            if args.out:
+                artifact_json(args.out, result, exclusive=True)
+            if args.markdown:
+                artifact_text(args.markdown, markdown_report(result), exclusive=True)
+            if not args.out:
+                print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
+        elif args.command in {"events-validate", "dataset-validate"}:
+            data = json.loads(args.path.read_text(encoding="utf-8-sig"))
+            result = validate_events(data) if args.command == "events-validate" else validate_dataset(data)
+            print(json.dumps({"valid": True, "schema_version": data["schema_version"]}))
+        elif args.command == "compare-experiments":
+            from .experiments import compare_experiments
+            artifact_json(args.out, compare_experiments(args.config), exclusive=True)
         return 0
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.error(str(exc))

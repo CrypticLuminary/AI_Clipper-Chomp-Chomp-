@@ -21,7 +21,8 @@ from ..signals import audio_observations, chat_observations, final_evidence, nea
 from .campaign import Campaign, milliseconds, resolve_campaign
 from .provider import CodexCLI
 from .selection import TranscriptIndex
-from .semantic import DirectorFailure, EditorialCalls, SelectionProvider, enforce, investigate, scan_dialogue
+from .semantic import (BudgetPolicy, DirectorFailure, EditorialCalls, SelectionProvider, STRIDE_MS, WINDOW_MS,
+                       enforce, investigate, scan_dialogue)
 
 JOB_CONTRACT = "director-selection/1"
 
@@ -140,7 +141,7 @@ def review_html(report: dict, media: Path, *, include_rejected: bool) -> str:
 def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: SelectionProvider | None = None,
              section: tuple[int, int] | None = None, transcript_path: Path | None = None,
              chat_path: Path | None = None, asr_model: str = "small", audio_stream: int = 0,
-             max_calls: int = 120, include_rejected: bool = False) -> dict:
+             max_calls: int = 120, include_rejected: bool = False, budget_policy: BudgetPolicy | None = None) -> dict:
     started = perf_counter()
     media, output = media.resolve(), output.resolve()
     meta = probe(media)
@@ -153,7 +154,9 @@ def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: Selecti
     cache = output / ".analysis"
     recorded = asdict(campaign)
     model_campaign = {key: value for key, value in recorded.items() if key != "rights_ref"}
-    calls = EditorialCalls(provider, cache, source_id, max_calls=max_calls) if provider is not None else None
+    # Validate direct Python callers with the same campaign rules used by the CLI.
+    campaign = resolve_campaign(**asdict(campaign))
+    calls = EditorialCalls(provider, cache, source_id, max_calls=max_calls, policy=budget_policy) if provider is not None else None
     fingerprint = calls.fingerprint if calls is not None else {"provider": "heuristic", "model": None}
     transcriber = LocalTranscriber(asr_model) if transcript_path is None and (provider or campaign.captions) else None
     config = {"schema_version": JOB_CONTRACT, "source": str(media), "source_id": source_id, "section_ms": section,
@@ -163,6 +166,8 @@ def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: Selecti
               "asr_model_requested": asr_model if transcriber else None,
               "asr_fingerprint": transcriber.fingerprint if transcriber else None,
               "max_calls": max_calls if calls is not None else None, "include_rejected": include_rejected}
+    if calls:
+        config["budget_policy"] = asdict(calls.policy)
     job_id = artifact_key(config)[:24]
     job = output / job_id
     report = {**config, "job_id": job_id, "duration_ms": duration, "mode": "dry_run", "review_status": "pending",
@@ -181,6 +186,9 @@ def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: Selecti
                 transcript, _ = transcriber.cached(cache, media, source_id, duration, audio_stream,
                                                    start_ms=start, end_ms=end, words=True)
             index = TranscriptIndex(transcript)
+            snapshot = job / "transcript.json"
+            write_json(snapshot, {"segments": [asdict(row) for row in transcript]})
+            report.update(transcript_snapshot=str(snapshot), transcript_snapshot_sha256=digest_file(snapshot))
             active = index.ids_in(start, end)
             coverage.update(available_utterances=len(active), no_transcript_ranges_ms=index.gaps(start, end))
             report["availability"]["transcript"] = bool(active)
@@ -195,7 +203,12 @@ def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: Selecti
             if baseline:
                 observations += transcript_observations(transcript, duration)
             else:
-                scan_dialogue(calls, index, section, model_campaign, coverage["windows"], proposals)
+                try:
+                    scan_dialogue(calls, index, section, model_campaign, coverage["windows"], proposals)
+                except DirectorFailure as exc:
+                    if exc.status != "discovery_budget_exhausted":
+                        raise
+                    report["discovery_warning"] = str(exc)
             signals = signal_candidates(observations, section)
             merge_signals(proposals, signals, index)
             decisions = (baseline_decisions(proposals, signals, index, transcript, observations, audio, section,
@@ -203,7 +216,7 @@ def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: Selecti
                          investigate(calls, index, section, campaign, model_campaign, proposals, report["investigation"]))
             report["decisions"] = enforce(proposals, decisions, index, section, campaign)
             report["selected_count"] = sum(row["verdict"] == "select" for row in report["decisions"])
-            report["status"] = "review_pending"
+            report["status"] = "partial_review_pending" if report.get("discovery_warning") else "review_pending"
         except DirectorFailure as exc:
             report.update(status=exc.status, error=str(exc))
         except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -214,10 +227,33 @@ def run_clip(media: Path, output: Path, campaign: Campaign, *, provider: Selecti
         finally:
             coverage["scanned_utterances"] = len({uid for window in coverage["windows"]
                                                   if window["status"] == "scanned" for uid in window["utterance_ids"]})
+            planned = []
+            for left in range(start, end, STRIDE_MS):
+                right = min(end, left + WINDOW_MS)
+                planned.append((left, right))
+                if right == end:
+                    break
+            completed = [window["range_ms"] for window in coverage["windows"]
+                         if window["status"] in {"scanned", "no_transcript"}]
+            cursor, uncovered = start, []
+            for left, right in sorted(completed):
+                if left > cursor:
+                    uncovered.append([cursor, left])
+                cursor = max(cursor, right)
+            if cursor < end:
+                uncovered.append([cursor, end])
+            coverage["expected_windows"] = len(planned) if calls else None
+            coverage["completed_windows"] = len(completed) if calls else None
+            coverage["unscanned_ranges_ms"] = uncovered if calls else None
+            coverage["discovery_complete"] = bool(calls and len(completed) == len(planned))
+            coverage["scope"] = "dialogue_only" if calls else "heuristic_signals"
+            coverage["section_ms"] = list(section)
             report["usage"] = {"provider_calls": calls.sent if calls else 0, "calls": calls.records if calls else [],
-                               "cost_usd": None if calls else 0}
+                               "cost_usd": None if calls else 0,
+                               "phase_calls": calls.phase_sent if calls else {},
+                               "cache_hits": sum(row["cached"] for row in calls.records) if calls else 0}
             report["elapsed_seconds"] = round(perf_counter() - started, 3)
-            if report["status"] == "review_pending":
+            if report["status"] in {"review_pending", "partial_review_pending"}:
                 page = job / "review.html"
                 write_text(page, review_html(report, media, include_rejected=include_rejected))
                 report["review_page"] = str(page)
@@ -248,23 +284,42 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--chat", type=Path, help="optional local livestream chat replay for signal discovery")
     parser.add_argument("--audio-stream", type=int, default=0)
     parser.add_argument("--max-calls", type=int, default=120, help="maximum new Codex calls per run")
+    parser.add_argument("--discovery-calls", type=int, help="new scan calls; defaults to total minus investigation and final reserves")
+    parser.add_argument("--investigation-calls", type=int, default=4)
+    parser.add_argument("--final-reserve", type=int, default=1)
+    parser.add_argument("--provider-timeout", type=float, default=150)
     parser.add_argument("--output", type=Path, default=Path("outputs"))
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="generate an editorial review without export (default)")
+    parser.add_argument("--render", action="store_true", help="opt in to validated review exports")
+    parser.add_argument("--acknowledge-permission", action="store_true")
     args = parser.parse_args(argv)
     if (args.director == "codex") != bool(args.model):
         parser.error("--director codex requires --model; heuristic has no model")
     if not 1 <= args.max_calls <= 300:
         parser.error("--max-calls must be between 1 and 300")
+    if args.render and (args.dry_run or not args.acknowledge_permission):
+        parser.error("--render requires --acknowledge-permission and cannot accompany --dry-run")
     try:
         campaign = resolve_campaign(args.campaign, **{key: getattr(args, key) for key in (
             "brief", "clips", "duration", "min_duration", "max_duration", "rights_ref", "platform", "aspect_ratio",
             "preferred_topics", "excluded_topics", "captions")})
         section = tuple(map(milliseconds, args.section)) if args.section else None
         provider = CodexCLI(args.model, effort="low") if args.model else None
+        policy = BudgetPolicy.for_total(args.max_calls, investigation_calls=args.investigation_calls,
+                                        final_reserve=args.final_reserve)
+        policy = replace(policy, call_timeout_seconds=args.provider_timeout)
+        if args.discovery_calls is not None:
+            policy = replace(policy, discovery_calls=args.discovery_calls)
+        policy.validate(args.max_calls)
         report = run_clip(args.source, args.output, campaign, provider=provider, section=section,
                           transcript_path=args.transcript, chat_path=args.chat, asr_model=args.asr_model,
-                          audio_stream=args.audio_stream, max_calls=args.max_calls, include_rejected=args.include_rejected)
+                          audio_stream=args.audio_stream, max_calls=args.max_calls, include_rejected=args.include_rejected,
+                          budget_policy=policy)
+        if args.render and report["status"] == "review_pending":
+            from .production import export_selection
+            report["production"] = export_selection(Path(report["job_report"]), args.output,
+                                                      acknowledge_permission=True)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         print(json.dumps({"status": "input_error", "error": str(exc)}), file=sys.stderr)
         return 1
@@ -274,5 +329,7 @@ def main(argv: list[str]) -> int:
                            for row in report["decisions"] if row["verdict"] == "select"]
     if "error" in report:
         summary["error"] = report["error"]
+    if "production" in report:
+        summary["review_manifest"] = report["production"]["review_manifest"]
     print(json.dumps(summary))
     return int(report["status"] != "review_pending")

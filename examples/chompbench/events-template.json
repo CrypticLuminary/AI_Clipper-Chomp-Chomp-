@@ -1,0 +1,16 @@
+{
+  "schema_version": "chomp-source-events/1",
+  "benchmark_name": "ChompBench-1",
+  "source_id": "replace-with-actual-source-content-identity",
+  "source": "private-external-media-map",
+  "creator_id": "replace-with-actual-creator-id",
+  "content_category": "replace-with-source-category",
+  "duration_ms": 60000,
+  "rights_reference": "replace-with-actual-authorization-reference",
+  "dataset_split": "development",
+  "annotation_completeness": "incomplete",
+  "annotation_origin": "human",
+  "reviewer": "replace-with-actual-independent-reviewer",
+  "complete": false,
+  "events": []
+}

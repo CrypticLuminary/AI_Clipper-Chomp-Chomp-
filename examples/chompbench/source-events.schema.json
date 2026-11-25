@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChompBench-1 additive source-event annotations",
+  "type": "object",
+  "required": ["schema_version", "source_id", "duration_ms", "reviewer", "complete", "events"],
+  "properties": {
+    "schema_version": {"const": "chomp-source-events/1"},
+    "source_id": {"type": "string", "minLength": 1},
+    "duration_ms": {"type": "integer", "minimum": 1},
+    "reviewer": {"type": "string", "minLength": 1},
+    "complete": {"type": "boolean"},
+    "benchmark_name": {"const": "ChompBench-1"},
+    "creator_id": {"type": "string", "minLength": 1},
+    "content_category": {"type": "string", "minLength": 1},
+    "rights_reference": {"type": "string", "minLength": 1},
+    "dataset_split": {"enum": ["development", "holdout"]},
+    "annotation_origin": {"enum": ["human", "synthetic", "ai"]},
+    "annotation_completeness": {"enum": ["complete", "incomplete"]},
+    "events": {"type": "array", "items": {"$ref": "#/$defs/event"}}
+  },
+  "allOf": [{
+    "if": {"required": ["benchmark_name"], "properties": {"benchmark_name": {"const": "ChompBench-1"}}},
+    "then": {
+      "required": ["creator_id", "content_category", "rights_reference", "dataset_split", "annotation_origin", "annotation_completeness"],
+      "properties": {"events": {"items": {"required": ["event_description", "highlight_category", "required_audio_evidence", "required_visual_evidence", "necessary_context", "viewer_value", "reviewer_id", "review_status"]}}},
+      "allOf": [{
+        "if": {"properties": {"complete": {"const": true}}},
+        "then": {"properties": {"annotation_completeness": {"const": "complete"}, "annotation_origin": {"enum": ["human", "synthetic"]}, "events": {"items": {"properties": {"review_status": {"const": "reviewed"}}}}}},
+        "else": {"properties": {"annotation_completeness": {"const": "incomplete"}}}
+      }]
+    }
+  }],
+  "$defs": {
+    "pair": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0}},
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "event": {
+      "type": "object", "required": ["id", "core_ms", "essential_ms", "start_range_ms", "end_range_ms"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "core_ms": {"$ref": "#/$defs/pair"}, "essential_ms": {"$ref": "#/$defs/pair"},
+        "start_range_ms": {"$ref": "#/$defs/pair"}, "end_range_ms": {"$ref": "#/$defs/pair"},
+        "event_description": {"type": "string", "minLength": 1}, "highlight_category": {"type": "string", "minLength": 1},
+        "required_audio_evidence": {"$ref": "#/$defs/strings"}, "required_visual_evidence": {"$ref": "#/$defs/strings"},
+        "necessary_context": {"type": "string", "minLength": 1}, "viewer_value": {"type": "string", "minLength": 1},
+        "reviewer_id": {"type": "string", "minLength": 1}, "review_status": {"enum": ["pending", "reviewed", "disputed"]}
+      }
+    }
+  }
+}

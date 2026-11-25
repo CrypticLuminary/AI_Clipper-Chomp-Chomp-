@@ -65,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         from .director.clip import main as clip_main
 
         return clip_main(argv[1:])
+    if argv and argv[0] == "render-director":
+        from .director.production import main as production_main
+
+        return production_main(argv[1:])
     if argv and argv[0] in ("rerender", "approve"):
         return _revision_command(argv[0], argv[1:])
     if argv and argv[0] == "director":

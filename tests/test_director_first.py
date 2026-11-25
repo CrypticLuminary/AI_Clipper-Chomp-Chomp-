@@ -98,8 +98,10 @@ def test_quiet_recall_cross_window_memory_and_hard_maximum(source_job):
 def test_partial_results_resume_and_cache_invalidates_by_brief_and_model(source_job):
     run, campaign = source_job
     provider = FixtureDirector()
-    failed = run(provider, max_calls=1)
-    assert failed["status"] == "budget_exhausted"
+    # Two calls reserve a final response after one discovery window. This
+    # scripted provider requests context despite zero reads being available.
+    failed = run(provider, max_calls=2)
+    assert failed["status"] == "investigation_budget_exhausted"
     assert failed["selected_count"] == 0
     assert 0 < failed["coverage"]["scanned_utterances"] < 6
     finished = run(FixtureDirector())

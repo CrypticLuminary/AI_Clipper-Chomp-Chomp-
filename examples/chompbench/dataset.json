@@ -1,0 +1,7 @@
+{
+  "schema_version": "chompbench-dataset/1",
+  "benchmark_name": "ChompBench-1",
+  "target_sources": 24,
+  "note": "Empty registration template. No authorized 24-VOD dataset or human holdout is claimed.",
+  "sources": []
+}

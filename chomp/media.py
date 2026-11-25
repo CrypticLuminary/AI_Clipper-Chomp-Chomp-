@@ -20,7 +20,7 @@ from .sound import SoundCue, cues_in_range
 
 SAMPLE_RATE = 2000
 SOURCE_CLOCK_AUDIO_FILTER = "aresample=async=1:first_pts=0"
-RENDER_VERSION = 7
+RENDER_VERSION = 8
 LAYOUTS = {"facecam-gameplay", "gameplay-only", "fit", "letterbox"}
 Rectangle = tuple[int, int, int, int]
 
@@ -430,10 +430,23 @@ def render_preview(
     # A seek between source frames otherwise shifts its first frame and can drop the last.
     full_source_shorts = (compiled_shots is None and shorts and len(segments) == 1
                           and segments[0].layout == "letterbox" and segments[0].gameplay_roi is None)
+    # A VFR source's final packet can end well before the requested cut even
+    # while audio continues. Realize legacy layouts on its nominal frame grid
+    # so the last visible image is held through the correct source duration.
+    try:
+        nominal_rate = Fraction(video["r_frame_rate"])
+        average_rate = Fraction(video["avg_frame_rate"])
+        variable_rate = nominal_rate != average_rate and 1 <= nominal_rate <= 120
+    except (KeyError, ValueError, ZeroDivisionError):
+        nominal_rate, variable_rate = Fraction(30), False
     if compiled_shots is not None:
         graph = compiled_shots.graph
     elif len(segments) == 1 and not full_source_shorts:
-        graph = _composite("[0:v:0]", "[stage]", segments[0], width, height, "a", sar)
+        if variable_rate:
+            graph = (f"[0:v:0]fps={nominal_rate}:start_time=0[vfr_source];" +
+                     _composite("[vfr_source]", "[stage]", segments[0], width, height, "a", sar))
+        else:
+            graph = _composite("[0:v:0]", "[stage]", segments[0], width, height, "a", sar)
     else:
         try:
             rate = Fraction(video["avg_frame_rate"])
@@ -441,6 +454,8 @@ def render_preview(
                 raise ValueError
         except (ValueError, ZeroDivisionError, KeyError):
             rate = Fraction(30)
+        if variable_rate:
+            rate = nominal_rate
         if any((seg.end_ms - seg.start_ms) * rate < 1000 for seg in segments):
             raise ValueError("Temporal layout segment is shorter than one source frame")
         clock = f"[0:v:0]fps={rate}:start_time=0"

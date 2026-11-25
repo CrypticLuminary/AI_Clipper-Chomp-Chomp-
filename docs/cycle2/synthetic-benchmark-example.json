@@ -1,0 +1,280 @@
+{
+  "schema_version": "chomp-event-benchmark/1",
+  "source_id": "sha256:17a0ffd336ca19377fb560af1d46c200d5aaa863f3396a11fc18371b757ea54f",
+  "job_id": "ad7f96658bdde31d8dc988c6",
+  "benchmark_name": "ChompBench-1",
+  "annotation_origin": "synthetic",
+  "dataset_split": "development",
+  "analysis_status": "review_pending",
+  "coverage": {
+    "available_utterances": 2,
+    "scanned_utterances": 2,
+    "windows": [
+      {
+        "range_ms": [
+          0,
+          8000
+        ],
+        "utterance_ids": [
+          "u1",
+          "u2"
+        ],
+        "status": "scanned",
+        "leads": []
+      }
+    ],
+    "no_transcript_ranges_ms": [
+      [
+        0,
+        1000
+      ],
+      [
+        2500,
+        3000
+      ],
+      [
+        5000,
+        8000
+      ]
+    ],
+    "expected_windows": 1,
+    "completed_windows": 1,
+    "unscanned_ranges_ms": [],
+    "discovery_complete": true,
+    "scope": "dialogue_only",
+    "section_ms": [
+      0,
+      8000
+    ]
+  },
+  "availability": {
+    "transcript": true,
+    "visual": false,
+    "audio_observations": true,
+    "chat_observations": false
+  },
+  "metrics": {
+    "proposal_recall": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "setup_payoff_completeness": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0,
+      "deprecated_alias_for": "event_essential_span_coverage",
+      "unit": "annotated_event",
+      "basis": "temporal_span_coverage_not_contextual_completeness"
+    },
+    "acceptable_boundary_rate": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0,
+      "deprecated_alias_for": "event_acceptable_boundary_rate",
+      "unit": "annotated_event",
+      "basis": "temporal_span_coverage_not_contextual_completeness"
+    },
+    "duplicate_selection_rate": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "correct_empty_result_rate": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null
+    },
+    "cache_hit_rate": {
+      "numerator": 0,
+      "denominator": 2,
+      "value": 0.0
+    },
+    "human_approved_clip_precision": {
+      "value": null,
+      "reason": "measurement_not_supplied"
+    },
+    "selected_clip_precision": {
+      "value": null,
+      "reason": "measurement_not_supplied"
+    },
+    "caption_overflow": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null
+    },
+    "missing_audio": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "silent_audio": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "av_sync_error_ms": {
+      "value": null,
+      "reason": "actual_audiovisual_synchronization_not_measured",
+      "schema_migration": "audio_envelope_absolute_lag_ms_replaces_previous_mislabeled_audio_only_value"
+    },
+    "streamer_retention": {
+      "value": null,
+      "reason": "measurement_not_supplied"
+    },
+    "protected_region_visibility": {
+      "value": null,
+      "reason": "measurement_not_supplied"
+    },
+    "camera_motion_stability": {
+      "value": null,
+      "reason": "measurement_not_supplied"
+    },
+    "peak_memory_bytes": {
+      "value": null,
+      "reason": "measurement_not_supplied"
+    },
+    "event_essential_span_coverage": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "event_acceptable_boundary_rate": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "matched_clip_essential_span_coverage": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "matched_clip_acceptable_boundary_rate": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "selected_clip_event_match_rate": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "unmatched_selection_rate": {
+      "numerator": 0,
+      "denominator": 1,
+      "value": 0.0
+    },
+    "human_reviewed_coverage": {
+      "value": null,
+      "numerator": null,
+      "denominator": 1,
+      "reason": "independent_clip_reviews_not_supplied"
+    },
+    "human_context_completeness": {
+      "value": null,
+      "reason": "independent_context_judgments_not_supplied"
+    },
+    "audio_envelope_absolute_lag_ms": {
+      "value": 0.0,
+      "denominator": 1,
+      "method": "audio_envelope_relative_to_source_20ms",
+      "is_audiovisual_sync": false
+    }
+  },
+  "complete_source_annotation": true,
+  "events": [
+    {
+      "id": "synthetic-event",
+      "discovered": true,
+      "selected": true,
+      "essential_preserved": true,
+      "boundaries_accepted": true,
+      "matching_selected": 1
+    }
+  ],
+  "metric_definitions_version": "chompbench-metrics/2",
+  "selected_clip_matches": [
+    {
+      "selected_index": 0,
+      "start_ms": 1000,
+      "end_ms": 5000,
+      "matched_event_ids": [
+        "synthetic-event"
+      ],
+      "essential_preserved": true,
+      "boundaries_accepted": true,
+      "event_matches": [
+        {
+          "event_id": "synthetic-event",
+          "essential_preserved": true,
+          "boundaries_accepted": true
+        }
+      ]
+    }
+  ],
+  "matched_selections": 1,
+  "unmatched_selections": 0,
+  "contextual_completeness_status": "requires_independent_review_and_KR01_KR08_research",
+  "annotated_events": 1,
+  "discovered_annotated_events": 1,
+  "proposal_recall": 1.0,
+  "selected_count": 1,
+  "proposals": 2,
+  "proposals_per_source_hour": 900.0,
+  "proposal_minutes_per_source_hour": 60.0,
+  "correctly_empty_on_negative_source": null,
+  "proposed_footage_ms": 12000,
+  "unique_proposed_footage_ms": 8000,
+  "timing": {
+    "total_seconds": 0.187,
+    "remote_api_cost": null,
+    "provider_calls": 2
+  },
+  "clip_reviews": [],
+  "acceptance_costs": [],
+  "provider_calls": 2,
+  "processing_seconds": 0.187,
+  "actual_api_cost": null,
+  "technical_measurements": {
+    "schema_version": "chompbench-technical/1",
+    "source_id": "sha256:17a0ffd336ca19377fb560af1d46c200d5aaa863f3396a11fc18371b757ea54f",
+    "job_id": "ad7f96658bdde31d8dc988c6",
+    "duration_ms": 8000,
+    "clips": [
+      {
+        "candidate_id": "d1",
+        "start_ms": 1000,
+        "end_ms": 5000,
+        "measurements": {
+          "width": 540,
+          "height": 960,
+          "duration_ms": 4000,
+          "full_decode_passed": true,
+          "source_audio_stream": 0,
+          "measured_audio_ms": 4000,
+          "source_dbfs": -19.09187180326335,
+          "output_dbfs": -22.114046684535484,
+          "missing_audio": false,
+          "expected_source_silence": false,
+          "silent_audio": false,
+          "unexpected_silent_audio": false,
+          "measurement_schema": "chomp-export-technical/2",
+          "waveform_correlation": 0.9999589899691474,
+          "audio_envelope_correlation": 0.9996731211328369,
+          "audio_envelope_lag_ms": 0,
+          "container_stream_start_delta_ms": 0.0,
+          "audiovisual_sync_error_ms": null,
+          "alignment_note": "Audio-to-source envelope alignment has 20ms resolution. Container start times do not establish audiovisual synchronization; lip-sync is unmeasured.",
+          "deprecated_aliases": {
+            "envelope_lag_ms": "audio_envelope_lag_ms",
+            "envelope_correlation": "audio_envelope_correlation",
+            "stream_start_delta_ms": "container_stream_start_delta_ms"
+          },
+          "envelope_lag_ms": 0,
+          "envelope_correlation": 0.9996731211328369,
+          "stream_start_delta_ms": 0.0
+        }
+      }
+    ]
+  }
+}
