@@ -48,6 +48,20 @@ def main():
         lines.append(f"| `{path.relative_to(ROOT).as_posix()}` | {', '.join(entry) or 'entry point/re-exports'} | {', '.join(deps)} | {', '.join(coverage) or 'indirect / no direct import'} |")
     lines += ["", "Workflow contracts: pipeline.process accepts a local source, rights/config and optional timestamped sidecars; produces candidates.json plus review_queue.json. director.clip.run_clip accepts the same source/campaign with a structured provider; produces director-selection/1. manual.render_manual_preview accepts exact source bounds and verified geometry; produces 0.5 review/edit artifacts. ShotComposer consumes source-hashed shot evidence and validated plans. ClipLedger evaluates independent reviews; benchmark evaluates source-event annotations.",
               "", "Duplication: manual and production share create_clip/render_preview; Director has separate proposal/decision logic by design. The Cycle 2 adapter reuses dictionaries and Candidate/TranscriptIndex/enforce rather than replacing all editorial contracts. Layout and SubjectLock evaluators remain the authority for geometry-specific comparisons."]
+    lines += ["", "| Major functionality / modules | Input contract | Output contract |", "|---|---|---|",
+        "| Ingestion/media | local authorized file, selected audio index, source-ms interval | duration_ms/streams; decoded PCM; validated H.264/AAC portrait export |",
+        "| Artifacts | source bytes, configuration, local paths | content hashes, locks, atomic versioned JSON/text |",
+        "| Signals/discovery | source-clock transcript/chat/audio bins; modality availability | Observation rows and Candidate proposals with source bounds/anchors |",
+        "| Boundaries/ranking/editorial | Candidate, source transcript, optional structured provider | BoundaryDecision and ranked/selected/reject/abstain reasons; max three |",
+        "| ASR/captions/speakers/diarization | selected source track, optional cached models/turn sidecar | timestamped TranscriptSegment/TimedWord/SpeakerTurn; clip-local SRT; identity templates requiring review |",
+        "| Framing/reframe/camera_evidence/camera_motion | source interval, decoded detections, reviewed anchor/ROI, optional models | FramingPlan/LayoutSegment, source-clock keyframes, conservative uncertainty fallback |",
+        "| Cutout/subject_lock/subject_view | local frames, optional segmentation, seeded identity/regions | tracked source regions, protected-region evidence and fit/visibility diagnostics |",
+        "| Sound/clipwork/manual | source interval/track, bounded local cue assets, validated layouts/captions | deterministic edit spec, export hashes, technical warnings, pending review/explicit approval artifact |",
+        "| Director contracts/evidence/provider | bounded untrusted evidence, pinned provider/schema and campaign | verified evidence bundles; structured decision/shot plans, or explicit failure/abstention |",
+        "| Director selection/production | candidate IDs, cited transcript snapshot and source hash | director-selection/1 lowered to existing renderer and 0.5 review queue |",
+        "| ShotComposer | source-hashed evidence, validated shot geometry/assets/timestamps | compiled deterministic render graph, timing/geometry diagnostics and review exports |",
+        "| Evaluation | source events, native/Director proposals, independent ClipLedger/region labels | denominators/null-aware JSON/Markdown; layout/subject comparisons |",
+        "| Research interfaces | optional provider, source identity/track, bounded requests and lane proposals | explicit unavailable states, stable evidence IDs, decoded PTS/hashes and unmerged lane provenance |"]
     (target / "module-map.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
