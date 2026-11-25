@@ -1,0 +1,179 @@
+{
+  "scope": "synthetic observation-level; five 1h fixtures; no real video; local baseline dependency shims",
+  "seeds": [
+    11,
+    12,
+    15,
+    17,
+    19
+  ],
+  "budgets": [
+    10,
+    20,
+    40,
+    60,
+    80
+  ],
+  "events_per_method_budget": 144,
+  "core_hits": {
+    "baseline": [
+      11,
+      55,
+      126,
+      130,
+      130
+    ],
+    "weighted": [
+      63,
+      113,
+      135,
+      136,
+      137
+    ],
+    "rrf": [
+      63,
+      113,
+      135,
+      136,
+      137
+    ],
+    "adaptive": [
+      50,
+      92,
+      135,
+      136,
+      138
+    ],
+    "fixed_assoc": [
+      52,
+      98,
+      135,
+      137,
+      138
+    ],
+    "fixed_window": [
+      54,
+      94,
+      135,
+      136,
+      138
+    ],
+    "no_balance": [
+      61,
+      116,
+      135,
+      137,
+      138
+    ],
+    "no_explore": [
+      53,
+      101,
+      135,
+      136,
+      137
+    ]
+  },
+  "budget40": {
+    "baseline": {
+      "context_hits": 81,
+      "extra_hits": 12,
+      "multi_event_windows": 44,
+      "footage_min_per_hour": 15.46,
+      "mean_ms": 2.73,
+      "max_python_KiB": 79.1,
+      "per_modality": {
+        "audio": [
+          49,
+          60
+        ],
+        "transcript": [
+          43,
+          48
+        ],
+        "chat": [
+          34,
+          36
+        ]
+      }
+    },
+    "rrf": {
+      "context_hits": 134,
+      "extra_hits": 8,
+      "multi_event_windows": 48,
+      "footage_min_per_hour": 14.73,
+      "mean_ms": 11.17,
+      "max_python_KiB": 170.5,
+      "per_modality": {
+        "audio": [
+          51,
+          60
+        ],
+        "transcript": [
+          48,
+          48
+        ],
+        "chat": [
+          36,
+          36
+        ]
+      }
+    },
+    "weighted": {
+      "context_hits": 134,
+      "extra_hits": 8,
+      "multi_event_windows": 48,
+      "footage_min_per_hour": 14.73,
+      "mean_ms": 12.39,
+      "max_python_KiB": 172.7
+    },
+    "adaptive": {
+      "context_hits": 134,
+      "extra_hits": 7,
+      "multi_event_windows": 48,
+      "footage_min_per_hour": 15.3,
+      "mean_ms": 21.54,
+      "max_python_KiB": 172.5
+    }
+  },
+  "stress": [
+    {
+      "hours": 1,
+      "observations": 200,
+      "proposals": 40,
+      "seconds": 0.03228,
+      "peak_bytes": 295150
+    },
+    {
+      "hours": 4,
+      "observations": 800,
+      "proposals": 160,
+      "seconds": 0.33108,
+      "peak_bytes": 1137159
+    },
+    {
+      "hours": 8,
+      "observations": 1600,
+      "proposals": 320,
+      "seconds": 1.25288,
+      "peak_bytes": 2049295
+    },
+    {
+      "hours": 12,
+      "observations": 2400,
+      "proposals": 480,
+      "seconds": 2.4887,
+      "peak_bytes": 3331495
+    }
+  ],
+  "unit_tests": {
+    "passed": 15,
+    "failed": 0,
+    "seconds": 0.057
+  },
+  "real_footage": null,
+  "human_review": null,
+  "model_invocations": 0,
+  "actual_merge_rate": null,
+  "process_rss": null,
+  "full_repository_tests": null
+}
