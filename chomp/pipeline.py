@@ -7,6 +7,7 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
+from shutil import disk_usage
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
@@ -86,12 +87,15 @@ def process(
     if profile not in PROFILES:
         raise ValueError("Unknown render profile")
 
+    if evolution is not None and (type(proposals_per_hour) is not int or not 1 <= proposals_per_hour <= 240):
+        raise ValueError("EVOLUTION proposals per hour must be 1–240")
     media = media.expanduser().resolve()
     output_root = output_root.expanduser().resolve()
     meta = probe(media)
     duration_ms = meta["duration_ms"]
     check_audio_track(meta, audio_stream)
     source_id = source_identity(media)
+    source_stat = media.stat() if evolution is not None else None
     cache = output_root / ".analysis"
     internal_asr = transcribe and transcript_path is None
     caption_asr = render and limit > 0 and (refine_captions or internal_asr)
@@ -144,13 +148,19 @@ def process(
                 if artifact_key(existing["provenance"]) != artifact_key(config):
                     raise ValueError("EVOLUTION review metadata does not match this job")
                 hashes = existing["evolution_artifact_sha256"]
+                if not {"candidates.json", "evolution_evidence.json", "review.html"} <= hashes.keys():
+                    raise ValueError("EVOLUTION review is missing its integrity metadata")
                 for clip in existing["clips"]:
                     hashes = {**hashes, **{Path(clip[key]).name: value for key, value in clip["artifact_sha256"].items()
                                          if value and clip.get(key)}}
-                if any(not (job_dir / name).is_file() or digest_file(job_dir / name) != expected
+                if any(Path(name).name != name or not (job_dir / name).is_file()
+                       or digest_file(job_dir / name) != expected
                        for name, expected in hashes.items()):
                     raise ValueError(f"EVOLUTION review artifacts changed. Use a new output folder to rerun {job_id}.")
             return {**existing, "reused_job": True}
+
+        if evolution is not None and disk_usage(output_root).free < evolution.min_free_mb * 1024**2:
+            raise ValueError("EVOLUTION output disk is below the configured free-space minimum")
 
         with closing(sqlite3.connect(output_root / "jobs.sqlite", timeout=20)) as database:
             database.execute("CREATE TABLE IF NOT EXISTS jobs "
@@ -186,6 +196,8 @@ def process(
                 speaker_ids = speaker_inventory(transcript, turns, main_speaker_id)
                 chat = read_chat(chat_path, duration_ms, chat_offset_ms)
                 diagnostics = {"transcript_seconds": round(perf_counter() - asr_started, 3)}
+                if evolution is not None and internal_asr and transcriber:
+                    diagnostics["asr_cache_hit"] = transcriber.last_cache_hit
 
                 analysis_started = perf_counter()
                 audio_error = None
@@ -222,6 +234,11 @@ def process(
                         evolution_report["availability"]["acoustic_heuristic"] = {"state": "failed", "reason": audio_error}
                     candidates = [candidate for candidate, _ in records]
                     by_object = {id(candidate): row for candidate, row in records}
+                    for candidate, row in records:
+                        _, contained = final_evidence(observations, transcript, candidate.start_ms, candidate.end_ms)
+                        candidate.speaker_context = candidate_speaker_context(
+                            contained, candidate.start_ms, candidate.end_ms, main_speaker_id)
+                        row["candidate"]["speaker_context"] = candidate.speaker_context
                 else:
                     candidates = discover(observations, transcript, duration_ms, proposals_per_hour=proposals_per_hour)
                     diagnostics.update(audio_cache_hit=audio_cached, discovery_seconds=round(perf_counter() - analysis_started, 3))
@@ -309,42 +326,72 @@ def process(
                     assets = []
                     for i, candidate in enumerate(selected, 1):
                         record = by_object[id(candidate)]
-                        title = (record["judgment"] or {}).get("title")
-                        start_ms, end_ms = candidate.start_ms, candidate.end_ms
-                        if "vision" in config:
-                            framing = cached_shorts_plan(media, source_id, start_ms, end_ms, cache,
-                                                         face_model=facecam_model, saliency_model=saliency_model,
-                                                         camera_slot=camera_slot, fingerprint=config["vision"],
-                                                         person_model=person_model)
-                        elif overrides is None and layout == "shorts":
-                            framing = plan_framing(media, start_ms, end_ms, layout, facecam_roi, facecam_model,
-                                                   camera_slot=camera_slot)
-                        else:
-                            framing = plan_framing(media, start_ms, end_ms, layout if overrides is None else "fit",
-                                                   facecam_roi if overrides is None else None, facecam_model)
-                        clip_text = transcript
-                        caption_source, caption_source_hash = snapshot, transcript_hash
-                        if caption_asr and transcriber and (evolution is None or not internal_asr):
-                            refined, refined_path = transcriber.cached(
-                                cache, media, source_id, duration_ms, audio_stream,
-                                start_ms=max(0, start_ms - 3000), end_ms=min(duration_ms, end_ms + 3000), words=True,
+                        clip_work = work
+                        if evolution is not None:
+                            clip_work = work / f".candidate-{i:02d}"
+                            clip_work.mkdir()
+                        try:
+                            title = (record["judgment"] or {}).get("title")
+                            start_ms, end_ms = candidate.start_ms, candidate.end_ms
+                            if "vision" in config:
+                                framing = cached_shorts_plan(media, source_id, start_ms, end_ms, cache,
+                                                             face_model=facecam_model, saliency_model=saliency_model,
+                                                             camera_slot=camera_slot, fingerprint=config["vision"],
+                                                             person_model=person_model)
+                            elif overrides is None and layout == "shorts":
+                                framing = plan_framing(media, start_ms, end_ms, layout, facecam_roi, facecam_model,
+                                                       camera_slot=camera_slot)
+                            else:
+                                framing = plan_framing(media, start_ms, end_ms, layout if overrides is None else "fit",
+                                                       facecam_roi if overrides is None else None, facecam_model)
+                            clip_text = transcript
+                            caption_source, caption_source_hash = snapshot, transcript_hash
+                            if caption_asr and transcriber and (evolution is None or not internal_asr):
+                                try:
+                                    refined, refined_path = transcriber.cached(
+                                        cache, media, source_id, duration_ms, audio_stream,
+                                        start_ms=max(0, start_ms - 3000), end_ms=min(duration_ms, end_ms + 3000), words=True,
+                                    )
+                                    if any(s.start_ms < end_ms and s.end_ms > start_ms for s in refined):
+                                        clip_text = refined
+                                        caption_source, caption_source_hash = refined_path, digest_file(refined_path)
+                                except (OSError, ValueError, RuntimeError) as exc:
+                                    if evolution is None:
+                                        raise
+                                    record["caption_refinement_error"] = str(exc)
+                            clip = create_clip(
+                                clip_work, job_dir, f"candidate_{i:02d}", source=media, source_id=source_id,
+                                rights_ref=rights_ref, start_ms=start_ms, end_ms=end_ms, duration_ms=duration_ms,
+                                transcript=clip_text, transcript_path=caption_source, transcript_sha256=caption_source_hash,
+                                framing=framing, gameplay_roi=gameplay_roi, audio_stream=audio_stream, render=render,
+                                profile=profile, caption_position=caption_position, audio_profile=audio_profile,
+                                layout_override=overrides,
+                                shorts_style=layout == "shorts",
+                                title=title, title_source="cited_dialogue", burn_hook=burn_hook,
                             )
-                            if any(s.start_ms < end_ms and s.end_ms > start_ms for s in refined):
-                                clip_text = refined
-                                caption_source, caption_source_hash = refined_path, digest_file(refined_path)
-                        clip = create_clip(
-                            work, job_dir, f"candidate_{i:02d}", source=media, source_id=source_id,
-                            rights_ref=rights_ref, start_ms=start_ms, end_ms=end_ms, duration_ms=duration_ms,
-                            transcript=clip_text, transcript_path=caption_source, transcript_sha256=caption_source_hash,
-                            framing=framing, gameplay_roi=gameplay_roi, audio_stream=audio_stream, render=render,
-                            profile=profile, caption_position=caption_position, audio_profile=audio_profile,
-                            layout_override=overrides,
-                            shorts_style=layout == "shorts",
-                            title=title, title_source="cited_dialogue", burn_hook=burn_hook,
-                        )
+                        except (OSError, ValueError, RuntimeError) as exc:
+                            if evolution is None:
+                                raise
+                            record.update(decision="processing_failure", render_error=str(exc))
+                            for item in clip_work.iterdir():
+                                item.unlink()
+                            clip_work.rmdir()
+                            continue
+                        if evolution is not None:
+                            for item in clip_work.iterdir():
+                                item.replace(work / item.name)
+                            clip_work.rmdir()
                         assets.append({**clip, "candidate_id": record["candidate_id"],
                                        "candidate": record["candidate"], "boundary": record["boundary"]})
 
+                    if source_stat is not None:
+                        from .evolution_hardware import peak_process_rss
+                        diagnostics["peak_worker_rss_bytes"] = peak_process_rss()
+                        current = media.stat()
+                        if (current.st_size, current.st_mtime_ns) != (source_stat.st_size, source_stat.st_mtime_ns):
+                            raise ValueError("Source changed during EVOLUTION analysis or rendering")
+                        diagnostics["processing_failures"] = sum(row["decision"] == "processing_failure"
+                                                                  for _, row in records)
                     diagnostics.update(export_seconds=round(perf_counter() - render_started, 3),
                                        total_seconds=round(perf_counter() - started, 3))
                     diagnostics["seconds_per_source_hour"] = round(diagnostics["total_seconds"] * 3_600_000 / duration_ms, 2)
@@ -374,6 +421,7 @@ def process(
                     if evolution_report is not None:
                         manifest.update(engine="evolution", evolution_evidence=str(job_dir / "evolution_evidence.json"),
                             ranking_notice="EVOLUTION review. Check source meaning and technical quality before approval.",
+                            analysis_status="partial" if diagnostics["processing_failures"] else "complete",
                             evolution_artifact_sha256={item.name: digest_file(item) for item in work.iterdir()
                                                        if item.name in {"candidates.json", "evolution_evidence.json",
                                                                         "review.html", "transcript.json"}})

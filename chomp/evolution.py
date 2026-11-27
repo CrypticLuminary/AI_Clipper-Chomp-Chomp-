@@ -9,14 +9,15 @@ import re
 from time import perf_counter
 
 from .artifacts import artifact_key
-from .evolution_context import Proposal, close, investigate, repeated_story
+from .evolution_context import Proposal, close, investigate, needs_setup, repeated_story
 from .evolution_memory import Memory, fused_score, reciprocal_ranks, terms
 from .evolution_perception import visual_frames, visual_motion, yamnet
 from .evolution_reasoning import InvestigationBudget, Reasoner, evidence_view, provider_investigation
 from .models import Candidate
+from .ranking import overlap_ratio
 from .research_interfaces import evidence_item
 
-VERSION = "evolution/1"
+VERSION = "evolution/4"
 PROFILES = {"eco": (8, 2500, 2800, 2800), "balanced": (16, 1250, 5600, 5600),
             "gpu": (24, 750, 9000, 9000)}
 LANES = ("dialogue", "acoustic", "visual", "chat", "exploration")
@@ -30,6 +31,10 @@ class EvolutionConfig:
     disabled: tuple[str, ...] = ()
     embeddings: Path | None = None
     audio_model: Path | None = None
+    visual_model: Path | None = None
+    max_semantic_frames: int | None = None
+    min_free_mb: int = 128
+    retry: str | None = None
     min_ms: int = 6_000
     max_ms: int = 45_000
     max_frames: int | None = None
@@ -49,10 +54,17 @@ class EvolutionConfig:
         if any(value is not None and not 1 <= value <= 12_000 for value in (self.max_frames, self.max_audio_windows)):
             raise ValueError("EVOLUTION frame and audio sample limits must be 1–12000")
 
+        if self.max_semantic_frames is not None and not 1 <= self.max_semantic_frames <= 640:
+            raise ValueError("EVOLUTION semantic frame limit must be 1–640")
+        if not 0 <= self.min_free_mb <= 50_000:
+            raise ValueError("EVOLUTION free-disk minimum must be 0–50000 MiB")
+        if self.retry is not None and (not self.retry.strip() or len(self.retry) > 80):
+            raise ValueError("EVOLUTION retry tag must be between 1 and 80 characters")
+
     def fingerprint(self):
         from .artifacts import digest_file
         result = asdict(self)
-        for field in ("embeddings", "audio_model", "model"):
+        for field in ("embeddings", "audio_model", "visual_model", "model"):
             path = result[field]
             if path is not None:
                 inputs = (path / "tokenizer.json", path / "onnx/model_quint8_avx2.onnx") if field == "embeddings" else (path,)
@@ -111,21 +123,42 @@ def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budg
     group_history = Counter()
     for i, row in enumerate(utterances):
         unit([row], 1, "asr-utterance")
+        clause = []
+        for word in row.get("words", []):
+            clause.append(word)
+            if len(clause) >= 3 and clause[-1]["text"].rstrip().endswith((".", "?", "!", ";", ",")):
+                if clause[0]["start_ms"] < clause[-1]["end_ms"]:
+                    atomic = evidence_item(**identity, start_ms=clause[0]["start_ms"], end_ms=clause[-1]["end_ms"],
+                        modality="semantic_unit", model_fingerprint={"producer": "word-timed-clause/1"},
+                        provenance={"original": [row["id"]]}, evidence_ids=[row["id"]], level=1,
+                        text=" ".join(word["text"].strip() for word in clause), boundary_status="proposal")
+                    if atomic["id"] not in memory.rows:
+                        memory.rows[atomic["id"]] = atomic
+                        units.append(atomic)
+                clause = []
         if episode:
             prior = episode[-1]
             topic_change = not tokens[row["id"]] & set().union(*(tokens[r["id"]] for r in episode[-3:]))
-            if row["start_ms"] - prior["end_ms"] > (3500 if topic_change else 9000) or row["end_ms"] - episode[0]["start_ms"] > 90_000:
+            if memory.vectors is not None:
+                semantic_similarity = float(memory.vectors[i - 1] @ memory.vectors[i])
+                topic_change = (topic_change and semantic_similarity < .55) or semantic_similarity < .25
+            if (row["start_ms"] - prior["end_ms"] > (3500 if topic_change else 9000)
+                    or row["end_ms"] - episode[0]["start_ms"] > 90_000):
                 unit(episode, 3, "topic-continuity")
                 episode = []
         episode.append(row)
         group = []
-        for neighbor in utterances[i:i + 4]:
-            if group and (neighbor["start_ms"] - group[-1]["end_ms"] > 3200 or
-                          neighbor["end_ms"] - row["start_ms"] > maximum):
-                break
+        for neighbor in utterances[i:i + 8]:
+            if group:
+                previous = group[-1]
+                related = bool(tokens[neighbor["id"]] & tokens[previous["id"]]) or needs_setup(neighbor["text"])
+                gap_limit = 5500 if related and neighbor["speaker_id"] == previous["speaker_id"] else 3200
+                if (neighbor["start_ms"] - previous["end_ms"] > gap_limit
+                        or neighbor["end_ms"] - row["start_ms"] > maximum):
+                    break
             group.append(neighbor)
             ids, start, end = unit(group, 2, "consecutive-thought")
-            if "dialogue" not in enabled:
+            if end - start > maximum or "dialogue" not in enabled:
                 continue
             text = " ".join(r["text"] for r in group)
             words = terms(text)
@@ -149,7 +182,11 @@ def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budg
 
     for row in list(memory.rows.values()):
         lane, strength, explanation = "", 0.0, ""
-        if row["modality"] in {"motion", "scene_transition"}:
+        if row["modality"] == "visual_state":
+            lane, strength, explanation = "visual", min(1., row["strength"] * 3), "Sparse CLIP visual change"
+            if row["strength"] < .035:
+                continue
+        elif row["modality"] in {"motion", "scene_transition"}:
             lane, strength, explanation = "visual", row["strength"], "Independent visual change"
             if strength < .035:
                 continue
@@ -166,6 +203,10 @@ def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budg
         if lane in enabled:
             start, end = row["start_ms"], row["end_ms"]
             if lane == "visual":
+                if row["modality"] == "visual_state" and row["previous_observation_id"]:
+                    previous = memory.rows[row["previous_observation_id"]]
+                    if start - previous["start_ms"] <= 8000:
+                        start = previous["start_ms"]
                 start, end = max(0, start - 1800), min(identity["duration_ms"], end + 1800)
             add(Proposal(lane, (row["id"],), start, end, strength, explanation))
 
@@ -209,6 +250,7 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
               "acoustic_heuristic": {"state": "available" if audio else "unavailable",
                                      "coverage_ms": min(duration, len(audio) * audio_hop)}}
     timings = {}
+    motion = []
     for name, active, load in (
         ("semantic_audio", "acoustic" in enabled and config.audio_model,
          lambda: yamnet(source, config.audio_model, cache, identity, audio_stream, config.max_audio_windows or audio_cap)),
@@ -221,9 +263,24 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
             try:
                 evidence, states[name] = load()
                 rows.extend(evidence)
+                if name == "visual":
+                    motion = evidence
             except (ImportError, OSError, TypeError, ValueError, RuntimeError) as exc:
                 states[name] = {"state": "failed", "reason": str(exc)}
         timings[name + "_seconds"] = round(perf_counter() - started, 3)
+
+    started = perf_counter()
+    states["semantic_visual"] = {"state": "unavailable", "reason": "disabled_or_not_configured"}
+    if "visual" in enabled and config.visual_model:
+        from .evolution_vision import clip_vision
+        try:
+            cap = config.max_semantic_frames or {"eco": 64, "balanced": 128, "gpu": 192}[config.profile]
+            evidence, states["semantic_visual"] = clip_vision(source, cache, identity, config.visual_model,
+                                                               motion, cap, config.profile == "gpu")
+            rows.extend(evidence)
+        except (ImportError, OSError, TypeError, ValueError, RuntimeError) as exc:
+            states["semantic_visual"] = {"state": "failed", "reason": str(exc)}
+    timings["semantic_visual_seconds"] = round(perf_counter() - started, 3)
 
     started = perf_counter()
     memory = Memory(rows, source_id, duration)
@@ -261,18 +318,22 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
         core = set(row["proposal"]["core_ids"])
         if any(core & set(other["proposal"]["core_ids"]) or
                repeated_story(candidate.transcript_excerpt, c.transcript_excerpt) or
-               (candidate.start_ms, candidate.end_ms) == (c.start_ms, c.end_ms) for c, other in selected):
+               (candidate.start_ms, candidate.end_ms) == (c.start_ms, c.end_ms) or
+               (row["proposal"]["lane"] == other["proposal"]["lane"] == "visual" and
+                overlap_ratio(candidate, c) > .55) for c, other in selected):
             row["decision"] = "duplicate"
         elif len(selected) >= limit:
             row["decision"] = "review_limit"
         else:
             row["decision"] = "selected"
             selected.append((candidate, row))
+    if memory.dense_failure:
+        states["dense"].update(state="partial", query_inference_error=memory.dense_failure, fallback="bm25")
     report = {"schema_version": "chomp-evolution-evidence/1", **identity, "availability": states,
               "observations": list(memory.rows.values()), "semantic_unit_count": len(units),
               "retrieval_history": memory.history, "timing": timings,
               "reasoning": {"attempts": reasoner.attempts, "cache_hits": reasoner.cache_hits, "errors": reasoner.errors,
-                            "provider": reasoner.fingerprint} if reasoner else {"state": "local_review"},
+                            "provider": reasoner.fingerprint, "reported_usage": dict(reasoner.usage)} if reasoner else {"state": "local_review"},
               "interest_model": interest["model_id"] if interest else None}
     return records, [candidate for candidate, _ in selected], report
 
@@ -293,6 +354,10 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
     features = [proposal.strength, min(len(terms(dialogue)) / 60, 1),
                 min(len(PAYOFF.findall(dialogue)) / 3, 1), float(bool(analysis["risks"])),
                 *(float(proposal.lane == lane) for lane in LANES)]
+    if memory.vectors is not None:
+        indices = [memory.utterance_indices[row["id"]] for row in core if row["modality"] == "utterance"]
+        if indices:
+            features.extend([1., *memory.vectors[indices].mean(axis=0).round(6).tolist()])
     if interest:
         from .evolution_feedback import interest_score
         score = round((score + 100 * interest_score(interest, features)) / 2, 2)
@@ -301,9 +366,9 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
     elif reasoner:
         try:
             if proposal.lane == "visual":
-                step = (proposal.end_ms - proposal.start_ms) // 4
-                frames = visual_frames(source, cache, identity,
-                                       [proposal.start_ms + step * i for i in (0, 1, 2, 3)], proposal.end_ms)
+                width = proposal.end_ms - proposal.start_ms
+                timestamps = [proposal.start_ms + width * fraction // 100 for fraction in (0, 33, 66, 90)]
+                frames = visual_frames(source, cache, identity, timestamps, proposal.end_ms)
                 memory.rows.update({row["id"]: row for row, _ in frames})
             model_data = provider_investigation(reasoner, memory, proposal, candidate_id, analysis, frames,
                                                 hybrid="hybrid" not in config.disabled,
@@ -315,8 +380,13 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
                 if state == "verify":
                     state = "unresolved"
             model_required = [r["evidence_id"] for r in answer["relationships"] if r["role"] == "viewer"]
-            if set(model_required) - set(x for group in answer["viewer_groups"] for x in group):
+            supplied = set(proposal.core_ids).union(*(set(group) for group in answer["viewer_groups"]))
+            if state == "verify" and set(model_required) - supplied:
                 raise ValueError("Provider viewer relationships lack a dependency group")
+            model_data["relationships"] = [{**relation, "direction": "before"
+                if memory.rows[relation["evidence_id"]]["end_ms"] <= proposal.start_ms else "after"
+                if memory.rows[relation["evidence_id"]]["start_ms"] >= proposal.end_ms else "overlap"}
+                for relation in answer["relationships"]]
             groups = [list(dict.fromkeys([*groups[0], *group])) for group in answer["viewer_groups"]]
         except (InvestigationBudget, AttributeError, OSError, TypeError, KeyError, ValueError, RuntimeError) as exc:
             state, note = "unresolved", str(exc)

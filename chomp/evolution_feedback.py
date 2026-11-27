@@ -12,15 +12,17 @@ from .director.contract import read_json
 
 REASONS = ("interest", "incomplete", "misleading", "wrong-start", "wrong-end", "wrong-speaker",
            "composition", "captions", "audio", "technical")
-FEATURE_COUNT = 9
-SCHEMA = "chomp-evolution-interest/1"
+LOCAL_FEATURES = 9
+FEATURE_COUNT = LOCAL_FEATURES + 1 + 384
+SCHEMA = "chomp-evolution-interest/2"
 
 
 def _vector(features):
-    if (not isinstance(features, list) or len(features) != FEATURE_COUNT
-            or any(type(x) not in (int, float) or not isfinite(x) or not 0 <= x <= 1 for x in features)):
+    if (not isinstance(features, list) or len(features) not in {LOCAL_FEATURES, FEATURE_COUNT}
+            or any(type(x) not in (int, float) or not isfinite(x) or not -1 <= x <= 1 for x in features)
+            or any(x < 0 for x in features[:LOCAL_FEATURES + 1])):
         raise ValueError("Invalid EVOLUTION interest feature vector")
-    return features
+    return features + [0.] * (FEATURE_COUNT - len(features))
 
 
 def add_feedback(ledger: Path, destination: Path, args) -> dict:
@@ -76,8 +78,10 @@ def import_clipledger(ledger: Path, queue: Path, annotations: Path, destination:
     if queue_data.get("engine") != "evolution" or Path(queue_data["candidate_ledger"]).resolve() != ledger.resolve():
         raise ValueError("Review queue and EVOLUTION candidate ledger do not match")
     result = read_annotations(manifest, annotations)
-    if manifest.source_id and result["source_id"] != manifest.source_id:
+    if manifest.source_id and result["source_id"] not in {manifest.source_id, manifest.source_id.removeprefix("sha256:")}:
         raise ValueError("Annotation source identity differs from the queue")
+    candidate_ids = {clip.clip_id: raw["candidate_id"]
+                     for clip, raw in zip(manifest.clips, queue_data["clips"], strict=True)}
     imported = 0
     for feedback in result["clips"]:
         decision = feedback["decision"]
@@ -86,7 +90,7 @@ def import_clipledger(ledger: Path, queue: Path, annotations: Path, destination:
         reasons = {"uninteresting": "interest", "audio": "audio", "framing": "composition",
                    "subtitles": "captions", "wrong_timing": "wrong-start"}
         reason = reasons.get(feedback["failure_category"], "incomplete")
-        args = SimpleNamespace(candidate=feedback["candidate_id"], reviewer=feedback["reviewer_id"], decision=decision,
+        args = SimpleNamespace(candidate=candidate_ids[feedback["clip_id"]], reviewer=feedback["reviewer_id"], decision=decision,
                                reason=reason, start_ms=None, end_ms=None, preferred=None,
                                notes=json_text(feedback))
         add_feedback(ledger, destination, args)

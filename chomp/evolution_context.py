@@ -8,8 +8,9 @@ import re
 from .boundaries import BoundaryDecision, _silence_snap
 from .evolution_memory import Memory, terms
 
-QUALIFICATION = re.compile(r"^\W*(?:but\b|however\b|unless\b|only if\b|except\b|to be clear\b|actually\b|i mean\b|that said\b|i was (?:joking|wrong)\b|correction\b)", re.I)
+QUALIFICATION = re.compile(r"^\W*(?:but\b|however\b|unless\b|only if\b|except\b|to be clear\b|actually\b|i (?:do not|don't) mean\b|i mean\b|that said\b|i was (?:joking|wrong)\b|correction\b)", re.I)
 DEPENDENT = re.compile(r"^\W*(?:he\b|she\b|they\b|it\b|that\b|this\b|those\b|then\b|because\b|which\b|and then\b|turns out\b|remember when\b)", re.I)
+REFERENTIAL = re.compile(r"\b(?:opened|picked up|found|grabbed|chose) (?:it|one|them)\b", re.I)
 RELATIONS = ["setup", "payoff", "explanation", "contradiction", "qualification", "callback"]
 
 
@@ -28,11 +29,15 @@ class Proposal:
         return (self.start_ms + self.end_ms) // 2
 
 
+def needs_setup(text: str) -> bool:
+    return bool(DEPENDENT.search(text) or REFERENTIAL.search(text))
+
+
 def investigate(memory: Memory, proposal: Proposal, search: bool, hybrid: bool) -> dict:
     core = memory.hydrate(proposal.core_ids)
     spoken = [row for row in core if row["modality"] == "utterance"]
     dialogue = " ".join(row["text"] for row in spoken)
-    context = memory.around(proposal.start_ms, proposal.end_ms, margin=3500)
+    context = memory.around(proposal.start_ms, proposal.end_ms, margin=5500)
     inside = {row["id"] for row in context}
     query_terms = sorted(set(terms(dialogue)), key=lambda token: (len(memory.postings[token]), token))[:9]
     queries = []
@@ -41,7 +46,6 @@ def investigate(memory: Memory, proposal: Proposal, search: bool, hybrid: bool) 
             queries.append({"scope": scope, "query": " ".join(query_terms), "reason": "Find setup or later qualification",
                             "hits": memory.search(" ".join(query_terms), scope=scope, anchor=anchor,
                                                   exclude=inside, limit=3, hybrid=hybrid)})
-    previous = [row for row in context if row["end_ms"] <= proposal.start_ms]
     following = [row for row in context if row["start_ms"] >= proposal.end_ms]
     first_speaker = spoken[0]["speaker_id"] if spoken else None
     last_speaker = spoken[-1]["speaker_id"] if spoken else None
@@ -61,10 +65,19 @@ def investigate(memory: Memory, proposal: Proposal, search: bool, hybrid: bool) 
             break
         if spoken:
             relate(successor, "qualification", True)
-    if spoken and DEPENDENT.search(spoken[0]["text"]):
-        if previous and previous[-1]["speaker_id"] == first_speaker:
-            relate(previous[-1], "setup", True)
-        else:
+    if spoken and needs_setup(spoken[0]["text"]):
+        cursor = proposal.start_ms
+        resolved = False
+        preceding = memory.around(max(0, proposal.start_ms - 16_000), proposal.start_ms)
+        for earlier in reversed([r for r in preceding if r["end_ms"] <= proposal.start_ms][-6:]):
+            if cursor - earlier["end_ms"] > 5500 or earlier["speaker_id"] != first_speaker:
+                break
+            relate(earlier, "setup", True)
+            cursor = earlier["start_ms"]
+            if not needs_setup(earlier["text"]) and not re.search(r"\b(?:their|his|her)\b", earlier["text"], re.I):
+                resolved = True
+                break
+        if not resolved:
             risks.append("unresolved_reference")
     if spoken and not re.search(r"""[.!?]["'”’)]*\s*$""", spoken[-1]["text"]):
         risks.append("uncertain_sentence_end")

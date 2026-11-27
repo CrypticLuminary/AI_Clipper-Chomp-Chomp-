@@ -1,7 +1,8 @@
 """Bounded investigations using the existing structured Director provider."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 
@@ -16,7 +17,7 @@ what happened, why a viewer might care, and any setup, correction, contradiction
 search results as leads and frame images as sparse observations. Do not invent reference IDs.
 Reject routine content. Abstain when material meaning is unresolved. Select only when evidence can
 support a standalone, faithful clip. Viewer-context groups are alternatives: each list is a set
-that is sufficient alongside the core. Use [[]] if the core is sufficient. Interpretation context
+that is sufficient alongside the core. Include only extra required IDs in the groups and use [[]]\nif the core is sufficient. Interpretation context
 helps you judge and is not required footage. List unresolved critical issues in critical_issues.
 Never equate energy, keyword hits, or a single visual frame with a verified event. For a visual
 candidate, ground an action described by ordered source frames and cite at least two of them.
@@ -65,6 +66,7 @@ class Reasoner:
     attempts: int = 0
     cache_hits: int = 0
     errors: int = 0
+    usage: Counter = field(default_factory=Counter)
 
     def __post_init__(self):
         self.deadline = monotonic() + self.runtime
@@ -93,6 +95,7 @@ class Reasoner:
                 response = self.provider.complete_structured_frames(prompt, contract, list(images), timeout=timeout)
             else:
                 response = self.provider.complete_structured(prompt, contract, timeout=timeout)
+            self.usage.update(response.usage or {})
             try:
                 if response.status != "response_received":
                     raise RuntimeError(f"Director provider status: {response.status}")

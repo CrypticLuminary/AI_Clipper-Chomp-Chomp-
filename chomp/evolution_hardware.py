@@ -86,3 +86,34 @@ def hardware():
             "gpu": gpu, "nvidia_driver_detected": bool(raw), "ctranslate2_cuda_devices": cuda_devices,
             "pytorch": torch_backend, "onnx_execution_providers": providers, **versions,
             "recommended_profile": profile}
+
+def peak_process_rss():
+    """Peak resident bytes for this worker, excluding FFmpeg child processes."""
+    if platform.system() == "Windows":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("page_faults", wintypes.DWORD),
+                        *((name, ctypes.c_size_t) for name in (
+                            "peak_rss", "rss", "peak_paged_pool", "paged_pool", "peak_nonpaged_pool",
+                            "nonpaged_pool", "pagefile", "peak_pagefile"))]
+
+        try:
+            counters = Counters()
+            counters.size = ctypes.sizeof(counters)
+            handle = ctypes.windll.kernel32.GetCurrentProcess
+            handle.restype = wintypes.HANDLE
+            query = ctypes.windll.psapi.GetProcessMemoryInfo
+            query.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+            if query(handle(), ctypes.byref(counters), counters.size):
+                return counters.peak_rss
+        except (AttributeError, OSError):
+            return None
+        return None
+    try:
+        import resource
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return usage if platform.system() == "Darwin" else usage * 1024
+    except (ImportError, OSError):
+        return None

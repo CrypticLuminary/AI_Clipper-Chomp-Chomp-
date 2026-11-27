@@ -128,3 +128,57 @@ def test_synthetic_training_excludes_technical_and_blocks_live_activation(tmp_pa
     assert result["holdout_metrics"]["examples"] == 1
     with pytest.raises(ValueError, match="human-trained"):
         load_model(Path(result["model"]))
+
+
+def test_partial_export_preserves_decisions_and_job_integrity(tmp_path, monkeypatch):
+    import shutil
+    from chomp.media import exec_checked
+    from chomp.pipeline import process
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg not installed")
+    source = tmp_path / "source.mp4"
+    exec_checked(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=s=160x90:r=8:d=12",
+                  "-f", "lavfi", "-i", "sine=duration=12", "-shortest", "-c:v", "libx264",
+                  "-c:a", "aac", str(source)])
+    transcript = tmp_path / "transcript.json"
+    write_json(transcript, {"segments": [{"start_ms": 1000, "end_ms": 9500,
+        "text": "I finally realized why the library keeps blue envelopes in different books. "
+                "What matters is the note that connects the reader with the author."}]})
+    opts = {"rights_ref": "generated test", "transcript_path": transcript, "layout": "fit", "render": True,
+            "evolution": EvolutionConfig(disabled=("visual", "acoustic", "exploration"))}
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic render failure")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr("chomp.pipeline.create_clip", fail)
+        result = process(source, tmp_path / "output", **opts)
+    assert result["analysis_status"] == "partial"
+    assert result["timing"]["processing_failures"] == 1
+    assert result["selected_for_review"] == 0
+    opts["evolution"] = EvolutionConfig(disabled=("visual", "acoustic", "exploration"), retry="recovered")
+    recovered = process(source, tmp_path / "output", **opts)
+    assert recovered["selected_for_review"] == 1
+    assert process(source, tmp_path / "output", **opts)["reused_job"]
+
+    from chomp.director.contract import read_json
+    from chomp.evaluation.core import make_template, read_manifest
+    from chomp.evolution_feedback import import_clipledger
+
+    queue = Path(recovered["candidate_ledger"]).with_name("review_queue.json")
+    annotation = tmp_path / "clipledger.json"
+    feedback = tmp_path / "feedback.json"
+    make_template(read_manifest(queue), annotation)
+    audit = read_json(annotation)
+    audit["clips"][0].update(decision="bad", failure_category="audio", reviewer_id="synthetic")
+    write_json(annotation, audit)
+    for _ in range(2):
+        assert import_clipledger(Path(recovered["candidate_ledger"]), queue, annotation, feedback) == {"imported": 1}
+    preserved = read_json(feedback)["records"]
+    assert len(preserved) == 1 and preserved[0]["reason"] == "audio"
+    assert preserved[0]["candidate_id"] == recovered["clips"][0]["candidate_id"]
+
+    Path(recovered["clips"][0]["preview"]).write_bytes(b"damaged fixture")
+    with pytest.raises(ValueError, match="review artifacts changed"):
+        process(source, tmp_path / "output", **opts)

@@ -151,13 +151,19 @@ def visual_frames(source: Path, cache: Path, identity: dict, timestamps: list[in
         path = cache / "evolution-frames" / f"{key}.png"
         meta = path.with_suffix(".json")
         with artifact_lock(cache / "locks" / f"{key}.lock"):
+            valid = False
             if meta.is_file() and path.is_file():
-                at, sha = read_json(meta)
-                if digest_file(path) != sha:
-                    raise ValueError("Visual evidence cache integrity check failed")
-                pixels = path.read_bytes()
-            else:
-                pixels, at, _, _ = extract_frame(source, requested)
+                try:
+                    at, sha = read_json(meta)
+                    pixels = path.read_bytes()
+                    valid = type(at) is int and sha256(pixels).hexdigest() == sha
+                except (OSError, ValueError, TypeError):
+                    pass
+            if not valid:
+                try:
+                    pixels, at, _, _ = extract_frame(source, requested)
+                except ValueError:
+                    continue
                 with staged_file(path) as pending:
                     pending.write_bytes(pixels)
                     pending.replace(path)

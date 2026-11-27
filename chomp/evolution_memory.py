@@ -13,6 +13,7 @@ from .research_interfaces import validate_evidence
 
 MINILM_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 MINILM_WEIGHTS = "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21"
+MINILM_TOKENIZER = "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
 STOP = frozenset("a an the it he she we you they i to of in for on or at is was are be and that this with my your me it so had has have but then just as do did what there".split())
 
 
@@ -42,10 +43,11 @@ class MiniLM:
 
         model = root / "onnx/model_quint8_avx2.onnx"
         tokenizer = root / "tokenizer.json"
-        if digest_file(model) != MINILM_WEIGHTS:
+        tokenizer_hash = digest_file(tokenizer)
+        if digest_file(model) != MINILM_WEIGHTS or tokenizer_hash != MINILM_TOKENIZER:
             raise ValueError("MiniLM weights differ from the supported checkpoint")
         self.fingerprint = {"model": "sentence-transformers/all-MiniLM-L6-v2", "revision": MINILM_REVISION,
-                            "tokenizer_sha256": digest_file(tokenizer), "pooling": "masked-mean-l2/1",
+                            "tokenizer_sha256": tokenizer_hash, "pooling": "masked-mean-l2/1",
                             "onnxruntime": version("onnxruntime"), "tokenizers": version("tokenizers")}
         self.np = np
         self.batch = batch
@@ -54,7 +56,10 @@ class MiniLM:
         self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
         options = ort.SessionOptions()
         options.intra_op_num_threads = min(4, batch)
-        self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+        try:
+            self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+        except Exception as exc:
+            raise RuntimeError(f"MiniLM ONNX runtime failed to load: {exc}") from exc
 
     def encode(self, texts: list[str]):
         np = self.np
@@ -65,7 +70,11 @@ class MiniLM:
             model_inputs = {"input_ids": np.asarray([e.ids for e in enc], dtype=np.int64),
                             "attention_mask": mask,
                             "token_type_ids": np.asarray([e.type_ids for e in enc], dtype=np.int64)}
-            tokens = self.session.run(None, {i.name: model_inputs[i.name] for i in self.session.get_inputs()})[0]
+            feeds = {i.name: model_inputs[i.name] for i in self.session.get_inputs()}
+            try:
+                tokens = self.session.run(None, feeds)[0]
+            except Exception as exc:
+                raise RuntimeError(f"MiniLM ONNX inference failed: {exc}") from exc
             pooled = (tokens * mask[:, :, None]).sum(axis=1).astype(np.float32)
             chunks.append(pooled / np.maximum(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12))
         return np.concatenate(chunks, axis=0)
@@ -76,6 +85,7 @@ class Memory:
         self.rows = {row["id"]: validate_evidence(row, source_id, duration_ms) for row in rows}
         self.utterances = sorted((r for r in rows if r["modality"] == "utterance"),
                                  key=lambda r: (r["start_ms"], r["end_ms"], r["id"]))
+        self.utterance_indices = {row["id"]: i for i, row in enumerate(self.utterances)}
         self.starts = [r["start_ms"] for r in self.utterances]
         self.max_utterance_ms = max((r["end_ms"] - r["start_ms"] for r in self.utterances), default=0)
         self.postings = defaultdict(list)
@@ -87,6 +97,7 @@ class Memory:
                 self.postings[term].append((index, count))
         self.average = max(1, sum(self.lengths) / max(1, len(self.lengths)))
         self.encoder = self.vectors = None
+        self.dense_failure = None
         self.history = []
         self._queries = {}
 
@@ -152,8 +163,12 @@ class Memory:
         dense = []
         similarity = None
         if hybrid and self.encoder is not None and query.strip():
-            similarity = self.vectors @ self.encoder.encode([query])[0]
-            for index in (-similarity).argsort(kind="stable"):
+            try:
+                similarity = self.vectors @ self.encoder.encode([query])[0]
+            except RuntimeError as exc:
+                self.dense_failure = str(exc)
+                self.encoder = None
+            for index in (-similarity).argsort(kind="stable") if similarity is not None else ():
                 if similarity[index] < .28 or len(dense) >= limit * 3:
                     break
                 if allowed(index):

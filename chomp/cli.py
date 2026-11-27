@@ -92,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hardware-profile", choices=["eco", "balanced", "gpu"], default="eco")
     p.add_argument("--evolution-disable", action="append", default=[], choices=[
         "dialogue", "acoustic", "visual", "chat", "exploration", "memory", "hybrid", "snap", "local-review", "quiet-asr"])
+    p.add_argument("--evolution-visual-model", type=Path, help="local pinned CLIP vision .onnx file")
+    p.add_argument("--evolution-max-semantic-frames", type=int)
+    p.add_argument("--evolution-retry", metavar="TAG", help="make a separate review job while reusing analysis caches")
+    p.add_argument("--evolution-min-free-mb", type=int, default=128)
     p.add_argument("--evolution-embeddings", type=Path, help="local pinned MiniLM directory")
     p.add_argument("--evolution-audio-model", type=Path, help="local pinned YAMNet .tflite file")
     p.add_argument("--evolution-interest-model", type=Path, help="specific human-trained model version")
@@ -231,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
             evolution = EvolutionConfig(
                 profile=args.hardware_profile, disabled=tuple(sorted(set(args.evolution_disable))),
                 embeddings=args.evolution_embeddings, audio_model=args.evolution_audio_model,
+                visual_model=args.evolution_visual_model, max_semantic_frames=args.evolution_max_semantic_frames,
+                retry=args.evolution_retry, min_free_mb=args.evolution_min_free_mb,
                 min_ms=args.evolution_min_ms, max_ms=args.evolution_max_ms, model=args.evolution_interest_model,
                 reasoning_calls=args.evolution_reasoning_calls, reasoning_seconds=args.evolution_reasoning_seconds,
                 max_frames=args.evolution_max_frames, max_audio_windows=args.evolution_max_audio_windows,
@@ -260,8 +266,12 @@ def main(argv: list[str] | None = None) -> int:
             _print({"source": src, "error": str(exc)})
             failures += 1
             continue
+        if result.get("engine") == "evolution" and result.get("analysis_status") == "partial":
+            failures += 1
         _print({"job_id": result["job_id"], "source": src, "candidates": result["candidate_count"],
                 "review_clips": result["selected_for_review"], "review_page": result["review_page"],
                 "candidate_ledger": result["candidate_ledger"], "reused_job": result.get("reused_job", False),
-                "review_queue": str(args.output.resolve() / result["job_id"] / "review_queue.json")})
+                "review_queue": str(args.output.resolve() / result["job_id"] / "review_queue.json"),
+                **({"evidence": result["evolution_evidence"], "analysis_status": result["analysis_status"]}
+                   if result.get("engine") == "evolution" else {})})
     return int(failures != 0)

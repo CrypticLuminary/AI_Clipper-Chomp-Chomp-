@@ -21,6 +21,7 @@ class LocalTranscriber:
         self.device = device
         self.language = language
         self.quiet_gain = quiet_gain
+        self.last_cache_hit = False
 
     @cached_property
     def model_path(self) -> Path:
@@ -126,7 +127,8 @@ class LocalTranscriber:
         key = artifact_key(provenance)
         path = cache / "transcripts" / (key + ".json")
         with artifact_lock(cache / "locks" / (key + ".lock"), timeout=600):
-            if not path.is_file():
+            self.last_cache_hit = path.is_file()
+            if not self.last_cache_hit:
                 segments = self.transcribe(media, start_ms, end_ms, audio_stream, words=words)
                 write_json(path, {"provenance": provenance, "segments": segments})
             return read_transcript(path, duration_ms), path
