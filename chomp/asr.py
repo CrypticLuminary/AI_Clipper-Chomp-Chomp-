@@ -15,10 +15,12 @@ _SCHEMA = "source-clock-asr/2"
 
 
 class LocalTranscriber:
-    def __init__(self, model: str = "small", device: str = "cpu", language: str | None = None):
+    def __init__(self, model: str = "small", device: str = "cpu", language: str | None = None,
+                 *, quiet_gain: bool = False):
         self.model = model
         self.device = device
         self.language = language
+        self.quiet_gain = quiet_gain
 
     @cached_property
     def model_path(self) -> Path:
@@ -50,7 +52,8 @@ class LocalTranscriber:
             if path.is_file():
                 files[name] = digest_file(path)
         return {"model": self.model, "weights": files, "device": self.device,
-                "language": self.language, "versions": versions, "schema": _SCHEMA}
+                "language": self.language, "versions": versions, "schema": _SCHEMA,
+                **({"gain": "quiet-local/1"} if self.quiet_gain else {})}
 
     @cached_property
     def engine(self):
@@ -74,6 +77,19 @@ class LocalTranscriber:
             samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
             if not samples.size or not np.any(np.abs(samples) > .0001):
                 continue
+            if self.quiet_gain:
+                # Boost quiet PCM for recognition while keeping the original recording and its clock.
+                size = 16_000
+                prior_gain = 1.0
+                for start in range(0, samples.size, size):
+                    block = samples[start:start + size]
+                    peak = float(np.max(np.abs(block)))
+                    gain = min(8.0, max(1.0, .18 / max(peak, .003))) if peak >= .003 else 1.0
+                    ramp = min(400, block.size)
+                    # Limit the ramp at a sudden transient following a quiet block.
+                    block[:ramp] *= np.linspace(min(prior_gain, gain), gain, ramp, dtype=np.float32)
+                    block[ramp:] *= gain
+                    prior_gain = gain
             segments, _ = self.engine.transcribe(samples, vad_filter=True, beam_size=3,
                                                  language=self.language, word_timestamps=words,
                                                  condition_on_previous_text=False)

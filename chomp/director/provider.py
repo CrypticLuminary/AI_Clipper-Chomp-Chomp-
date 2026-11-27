@@ -156,6 +156,9 @@ class CodexCLI:
     def complete_structured(self, prompt: str, contract: dict, *, timeout: float) -> Response:
         return self._complete(prompt, contract, [], min(self.timeout, timeout))
 
+    def complete_structured_frames(self, prompt: str, contract: dict, images: list[bytes], *, timeout: float) -> Response:
+        return self._complete(prompt, contract, images, min(self.timeout, timeout))
+
     def _complete(self, prompt: str, contract: dict, images: list[bytes], timeout: float) -> Response:
         identity = self._identity
         if isinstance(identity, Response):

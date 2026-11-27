@@ -16,6 +16,7 @@ from .boundaries import refine_boundaries
 from .clipwork import PROFILES, SCHEMA, create_clip, read_layout_plan, review_page
 from .discovery import discover
 from .editorial import EditorialProvider, context_for, judge_cached, story_boundary
+from .evolution import EvolutionConfig, run_evolution
 from .framing import facecam_fingerprint, plan_framing
 from .media import RENDER_VERSION, check_audio_track, probe, scan_audio
 from .ranking import duplicate, heuristic_rank, quality, select
@@ -73,7 +74,7 @@ def process(
     editorial_provider: EditorialProvider | None = None, semantic_budget: int = 12,
     saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
     camera_motion: str = "pan", camera_fit: str = "auto",
-    burn_hook: bool = False,
+    burn_hook: bool = False, evolution: EvolutionConfig | None = None, evolution_provider=None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -94,8 +95,20 @@ def process(
     cache = output_root / ".analysis"
     internal_asr = transcribe and transcript_path is None
     caption_asr = render and limit > 0 and (refine_captions or internal_asr)
-    transcriber = LocalTranscriber(asr_model, asr_device, asr_language) if internal_asr or caption_asr else None
+    quiet_gain = evolution is not None and "quiet-asr" not in evolution.disabled
+    asr_options = {"quiet_gain": True} if quiet_gain else {}
+    transcriber = LocalTranscriber(asr_model, asr_device, asr_language, **asr_options) if internal_asr or caption_asr else None
     provider = editorial_provider if limit else None
+
+    asr_error = None
+    try:
+        asr_signature = transcriber.fingerprint if transcriber else None
+    except (OSError, ValueError, RuntimeError) as exc:
+        if evolution is None:
+            raise
+        asr_signature = {"requested": asr_model, "device": asr_device, "unavailable": str(exc)}
+        asr_error = str(exc)
+        transcriber = None
 
     config = {
         "source": str(media), "source_id": source_id, "pipeline_version": _PIPELINE_VERSION,
@@ -103,7 +116,7 @@ def process(
         "rights_ref": rights_ref, "transcript": digest_file(transcript_path) if transcript_path else None,
         "chat": digest_file(chat_path) if chat_path else None, "chat_offset_ms": chat_offset_ms,
         "reaction_lag_ms": reaction_lag_ms, "speaker_turns": digest_file(speaker_turns_path) if speaker_turns_path else None,
-        "main_speaker_id": main_speaker_id, "audio_stream": audio_stream, "asr": transcriber.fingerprint if transcriber else None,
+        "main_speaker_id": main_speaker_id, "audio_stream": audio_stream, "asr": asr_signature,
         "internal_asr": internal_asr, "caption_asr": caption_asr, "proposals_per_hour": proposals_per_hour,
         "min_score": min_score, "limit": limit, "render": render, "layout": layout,
         "facecam_roi": facecam_roi, "gameplay_roi": gameplay_roi, "profile": profile,
@@ -112,6 +125,9 @@ def process(
         "editorial_provider": provider.fingerprint if provider else None, "semantic_budget": semantic_budget,
         "camera_slot": camera_slot, "burn_hook": burn_hook,
     }
+    if evolution is not None:
+        config["evolution"] = evolution.fingerprint()
+        config["evolution_provider"] = evolution_provider.fingerprint if evolution_provider and limit else None
     if layout == "shorts" and facecam_roi is None and layout_plan is None:
         config["vision"] = vision_fingerprint(facecam_model, saliency_model, camera_motion=camera_motion,
                                               camera_fit=camera_fit, person_model=person_model)
@@ -124,6 +140,16 @@ def process(
     with artifact_lock(job_lock, timeout=5):
         if manifest_path.is_file():
             existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if evolution is not None:
+                if artifact_key(existing["provenance"]) != artifact_key(config):
+                    raise ValueError("EVOLUTION review metadata does not match this job")
+                hashes = existing["evolution_artifact_sha256"]
+                for clip in existing["clips"]:
+                    hashes = {**hashes, **{Path(clip[key]).name: value for key, value in clip["artifact_sha256"].items()
+                                         if value and clip.get(key)}}
+                if any(not (job_dir / name).is_file() or digest_file(job_dir / name) != expected
+                       for name, expected in hashes.items()):
+                    raise ValueError(f"EVOLUTION review artifacts changed. Use a new output folder to rerun {job_id}.")
             return {**existing, "reused_job": True}
 
         with closing(sqlite3.connect(output_root / "jobs.sqlite", timeout=20)) as database:
@@ -132,10 +158,27 @@ def process(
             _job_status(database, job_id, media, manifest_path, "running")
             try:
                 asr_started = perf_counter()
+                diagnostics_asr = asr_signature
                 if transcript_path:
                     transcript = read_transcript(transcript_path, duration_ms)
-                elif internal_asr:
-                    transcript, _ = transcriber.cached(cache, media, source_id, duration_ms, audio_stream)
+                elif internal_asr and transcriber:
+                    try:
+                        transcript, _ = transcriber.cached(cache, media, source_id, duration_ms, audio_stream,
+                                                           **({"words": True} if evolution is not None else {}))
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        if evolution is None:
+                            raise
+                        asr_error = str(exc)
+                        transcript = []
+                        transcriber = None
+                        if asr_device == "cuda":
+                            try:
+                                cpu = LocalTranscriber(asr_model, "cpu", asr_language, **asr_options)
+                                transcript, _ = cpu.cached(cache, media, source_id, duration_ms, audio_stream, words=True)
+                                diagnostics_asr = cpu.fingerprint
+                                transcriber = cpu
+                            except (OSError, ValueError, RuntimeError) as cpu_error:
+                                asr_error = f"{asr_error}; CPU fallback: {cpu_error}"
                 else:
                     transcript = []
                 turns = read_speaker_turns(speaker_turns_path, duration_ms, source_id=source_id, audio_stream=audio_stream)
@@ -145,83 +188,114 @@ def process(
                 diagnostics = {"transcript_seconds": round(perf_counter() - asr_started, 3)}
 
                 analysis_started = perf_counter()
-                audio, audio_cached = _audio_curve(cache, media, source_id, audio_stream, duration_ms)
+                audio_error = None
+                try:
+                    audio, audio_cached = _audio_curve(cache, media, source_id, audio_stream, duration_ms)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    if evolution is None:
+                        raise
+                    audio_error = str(exc)
+                    audio, audio_cached = [], False
                 observations = audio_observations(audio, duration_ms, hop_ms=_AUDIO_HOP_MS)
                 observations += transcript_observations(transcript, duration_ms)
                 observations += chat_observations(chat, duration_ms, reaction_lag_ms=reaction_lag_ms)
-                candidates = discover(observations, transcript, duration_ms, proposals_per_hour=proposals_per_hour)
-                diagnostics.update(audio_cache_hit=audio_cached, discovery_seconds=round(perf_counter() - analysis_started, 3))
+                evolution_report = None
+                if evolution is not None:
+                    diagnostics.update(audio_cache_hit=audio_cached,
+                                       audio_scan_seconds=round(perf_counter() - analysis_started, 3))
+                    records, selected, evolution_report = run_evolution(
+                        evolution, source=media, source_id=source_id, duration=duration_ms, cache=cache,
+                        transcript=transcript, turns=turns, observations=observations, audio=audio,
+                        audio_stream=audio_stream, audio_hop=_AUDIO_HOP_MS,
+                        asr={"producer": "transcript-sidecar/1", "sha256": config["transcript"]} if transcript_path
+                            else diagnostics_asr or {"producer": "missing-asr"},
+                        provider=evolution_provider, proposals_per_hour=proposals_per_hour,
+                        limit=limit, min_score=min_score,
+                    )
+                    diagnostics.update(evolution_report["timing"])
+                    if asr_error:
+                        evolution_report["availability"]["utterance"] = {
+                            "state": "available" if transcriber else "failed", "reason": asr_error,
+                            "fallback": "cpu" if transcriber else None, "count": len(transcript),
+                        }
+                    if audio_error:
+                        evolution_report["availability"]["acoustic_heuristic"] = {"state": "failed", "reason": audio_error}
+                    candidates = [candidate for candidate, _ in records]
+                    by_object = {id(candidate): row for candidate, row in records}
+                else:
+                    candidates = discover(observations, transcript, duration_ms, proposals_per_hour=proposals_per_hour)
+                    diagnostics.update(audio_cache_hit=audio_cached, discovery_seconds=round(perf_counter() - analysis_started, 3))
 
-                ranking_started = perf_counter()
-                records = []
-                eligible = []
-                judgments_sent = judgments_cached = 0
-                for index, candidate in enumerate(candidates):
-                    original = candidate.to_dict()
-                    identifier = artifact_key([source_id, original["start_ms"], original["end_ms"],
-                                               candidate.anchor_ms, original["observations"]])[:24]
-                    decision = refine_boundaries(candidate, transcript, duration_ms, audio_levels=audio,
-                                                 audio_hop_ms=_AUDIO_HOP_MS,
-                                                 max_length_ms=26_000 if layout == "shorts" else 60_000)
-                    judgment = context = None
-                    reason = "eligible"
-                    error_detail = None
-                    if provider is not None:
-                        context = context_for(candidate, transcript, duration_ms)
-                        if not context["utterances"]:
-                            reason = "insufficient_transcript_for_semantic_judgment"
-                        elif index >= semantic_budget:
-                            reason = "semantic_budget_exhausted"
+                    ranking_started = perf_counter()
+                    records = []
+                    eligible = []
+                    judgments_sent = judgments_cached = 0
+                    for index, candidate in enumerate(candidates):
+                        original = candidate.to_dict()
+                        identifier = artifact_key([source_id, original["start_ms"], original["end_ms"],
+                                                   candidate.anchor_ms, original["observations"]])[:24]
+                        decision = refine_boundaries(candidate, transcript, duration_ms, audio_levels=audio,
+                                                     audio_hop_ms=_AUDIO_HOP_MS,
+                                                     max_length_ms=26_000 if layout == "shorts" else 60_000)
+                        judgment = context = None
+                        reason = "eligible"
+                        error_detail = None
+                        if provider is not None:
+                            context = context_for(candidate, transcript, duration_ms)
+                            if not context["utterances"]:
+                                reason = "insufficient_transcript_for_semantic_judgment"
+                            elif index >= semantic_budget:
+                                reason = "semantic_budget_exhausted"
+                            else:
+                                try:
+                                    judgment, reused = judge_cached(provider, context, cache)
+                                    judgments_cached += int(reused)
+                                    judgments_sent += int(not reused)
+                                    if judgment["verdict"] == "select":
+                                        decision = story_boundary(candidate, judgment, context, duration_ms)
+                                        candidate.start_ms, candidate.end_ms = decision.start_ms, decision.end_ms
+                                    else:
+                                        reason = judgment["verdict"]
+                                except (ValueError, RuntimeError, TimeoutError) as exc:
+                                    reason = "semantic_abstention"
+                                    error_detail = str(exc)
+                        c0, c1 = candidate.start_ms, candidate.end_ms
+                        candidate.observations, contained = final_evidence(observations, transcript, c0, c1)
+                        candidate.transcript_excerpt = nearby_text(contained, c0, c1)
+                        candidate.speaker_context = candidate_speaker_context(contained, c0, c1, main_speaker_id)
+                        if judgment is not None and reason == "eligible":
+                            candidate.categories = judgment["categories"] or ["other"]
+                            candidate.scores = judgment["scores"]
+                            candidate.score = quality(candidate.scores)
+                            candidate.ranking_method = "grounded_semantic"
+                            candidate.rationale = judgment["rationale"]
+                            candidate.missing_context = False
+                            candidate.requires_visual_verification = judgment["requires_visual_verification"]
                         else:
-                            try:
-                                judgment, reused = judge_cached(provider, context, cache)
-                                judgments_cached += int(reused)
-                                judgments_sent += int(not reused)
-                                if judgment["verdict"] == "select":
-                                    decision = story_boundary(candidate, judgment, context, duration_ms)
-                                    candidate.start_ms, candidate.end_ms = decision.start_ms, decision.end_ms
-                                else:
-                                    reason = judgment["verdict"]
-                            except (ValueError, RuntimeError, TimeoutError) as exc:
-                                reason = "semantic_abstention"
-                                error_detail = str(exc)
-                    c0, c1 = candidate.start_ms, candidate.end_ms
-                    candidate.observations, contained = final_evidence(observations, transcript, c0, c1)
-                    candidate.transcript_excerpt = nearby_text(contained, c0, c1)
-                    candidate.speaker_context = candidate_speaker_context(contained, c0, c1, main_speaker_id)
-                    if judgment is not None and reason == "eligible":
-                        candidate.categories = judgment["categories"] or ["other"]
-                        candidate.scores = judgment["scores"]
-                        candidate.score = quality(candidate.scores)
-                        candidate.ranking_method = "grounded_semantic"
-                        candidate.rationale = judgment["rationale"]
-                        candidate.missing_context = False
-                        candidate.requires_visual_verification = judgment["requires_visual_verification"]
-                    else:
-                        heuristic_rank(candidate)
-                    candidate.validate(duration_ms)
-                    if reason == "eligible":
-                        if candidate.score < min_score:
-                            reason = "below_threshold"
-                        else:
-                            eligible.append(candidate)
-                    records.append((candidate, {"candidate_id": identifier, "proposal": original,
-                                                "candidate": candidate.to_dict(), "boundary": asdict(decision),
-                                                "judgment": judgment, "judgment_context": context,
-                                                "decision": reason, "reason_detail": error_detail}))
-                selected = select(eligible, max_clips=limit, min_score=min_score)
-                selected_ids = {id(candidate) for candidate in selected}
-                by_object = {}
-                for candidate, row in records:
-                    if id(candidate) in selected_ids:
-                        row["decision"] = "selected"
-                    elif row["decision"] == "eligible":
-                        row["decision"] = ("duplicate" if any(duplicate(candidate, c) for c in selected)
-                                           else "review_limit")
-                    by_object[id(candidate)] = row
-                diagnostics.update(ranking_seconds=round(perf_counter() - ranking_started, 3),
-                                   local_model_judgments=judgments_sent, cached_judgments=judgments_cached,
-                                   remote_api_cost=0)
+                            heuristic_rank(candidate)
+                        candidate.validate(duration_ms)
+                        if reason == "eligible":
+                            if candidate.score < min_score:
+                                reason = "below_threshold"
+                            else:
+                                eligible.append(candidate)
+                        records.append((candidate, {"candidate_id": identifier, "proposal": original,
+                                                    "candidate": candidate.to_dict(), "boundary": asdict(decision),
+                                                    "judgment": judgment, "judgment_context": context,
+                                                    "decision": reason, "reason_detail": error_detail}))
+                    selected = select(eligible, max_clips=limit, min_score=min_score)
+                    selected_ids = {id(candidate) for candidate in selected}
+                    by_object = {}
+                    for candidate, row in records:
+                        if id(candidate) in selected_ids:
+                            row["decision"] = "selected"
+                        elif row["decision"] == "eligible":
+                            row["decision"] = ("duplicate" if any(duplicate(candidate, c) for c in selected)
+                                               else "review_limit")
+                        by_object[id(candidate)] = row
+                    diagnostics.update(ranking_seconds=round(perf_counter() - ranking_started, 3),
+                                       local_model_judgments=judgments_sent, cached_judgments=judgments_cached,
+                                       remote_api_cost=0)
                 overrides = read_layout_plan(layout_plan)
                 render_started = perf_counter()
                 with TemporaryDirectory(prefix=".job-", dir=output_root, ignore_cleanup_errors=True) as temporary:
@@ -250,7 +324,7 @@ def process(
                                                    facecam_roi if overrides is None else None, facecam_model)
                         clip_text = transcript
                         caption_source, caption_source_hash = snapshot, transcript_hash
-                        if caption_asr:
+                        if caption_asr and transcriber and (evolution is None or not internal_asr):
                             refined, refined_path = transcriber.cached(
                                 cache, media, source_id, duration_ms, audio_stream,
                                 start_ms=max(0, start_ms - 3000), end_ms=min(duration_ms, end_ms + 3000), words=True,
@@ -278,6 +352,8 @@ def process(
                               "source": str(media), "duration_ms": duration_ms, "proposals_per_hour": proposals_per_hour,
                               "candidates": [row for _, row in records], "timing": diagnostics}
                     write_json(work / "candidates.json", ledger)
+                    if evolution_report is not None:
+                        write_json(work / "evolution_evidence.json", evolution_report)
                     manifest = {
                         "schema_version": SCHEMA, "job_id": job_id, "source": str(media), "source_id": source_id,
                         "duration_ms": duration_ms, "rights_ref": rights_ref,
@@ -295,6 +371,12 @@ def process(
                         "timing": diagnostics, "provenance": config,
                     }
                     review_page(work / "review.html", assets, "Chomp-Chomp clip review")
+                    if evolution_report is not None:
+                        manifest.update(engine="evolution", evolution_evidence=str(job_dir / "evolution_evidence.json"),
+                            ranking_notice="EVOLUTION review. Check source meaning and technical quality before approval.",
+                            evolution_artifact_sha256={item.name: digest_file(item) for item in work.iterdir()
+                                                       if item.name in {"candidates.json", "evolution_evidence.json",
+                                                                        "review.html", "transcript.json"}})
                     write_json(work / manifest_path.name, manifest)
                     if job_dir.exists():
                         raise FileExistsError(f"An incomplete job already exists at {job_dir}. Choose a new output folder.")
