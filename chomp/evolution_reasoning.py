@@ -36,6 +36,8 @@ def _array(items, maximum):
 _TEXT = {"type": "string", "maxLength": 500}
 _IDS = _array({"type": "string", "maxLength": 70}, 16)
 _ACTION = {"type": "string", "enum": ["select", "reject", "unresolved"]}
+_INVESTIGATE_ACTION = {"type": "string", "enum": ["select", "reject", "unresolved", "request_context", "update_interpretation"]}
+REPAIRS = {"expand_start", "expand_end", "contract_start", "contract_end"}
 
 INVESTIGATION = _obj(
     candidate_id={"type": "string"}, interpretation=_TEXT, viewer_value=_TEXT, supporting_ids=_IDS,
@@ -47,10 +49,17 @@ INVESTIGATION = _obj(
                               role={"type": "string", "enum": ["viewer", "interpretation"]}), 12),
     viewer_groups=_array(_IDS, 6), interpretation_ids=_IDS, critical_issues=_array(_TEXT, 6),
     uncertainty={"type": "string", "enum": ["low", "medium", "high"]},
-    stop_reason=_TEXT, action=_ACTION,
+    stop_reason=_TEXT, action=_INVESTIGATE_ACTION,
 )
 FINAL = _obj(candidate_id={"type": "string"}, action=_ACTION, rationale=_TEXT, supporting_ids=_IDS,
              critical_issues=_array(_TEXT, 6), score={"type": "integer", "minimum": 0, "maximum": 100})
+
+
+VERIFY = _obj(candidate_id={"type": "string"},
+              action={"type": "string", "enum": [*_ACTION["enum"], *sorted(REPAIRS)]}, rationale=_TEXT,
+              supporting_ids=_IDS, critical_issues=_array(_TEXT, 6),
+              score={"type": "integer", "minimum": 0, "maximum": 100},
+              repair_evidence_id={"type": ["string", "null"], "maxLength": 70})
 
 
 class InvestigationBudget(RuntimeError):
@@ -67,14 +76,32 @@ class Reasoner:
     cache_hits: int = 0
     errors: int = 0
     usage: Counter = field(default_factory=Counter)
+    balanced: bool = False
+    phases: Counter = field(default_factory=Counter)
 
     def __post_init__(self):
         self.deadline = monotonic() + self.runtime
         self.fingerprint = self.provider.fingerprint
 
+    @property
+    def allocation(self):
+        # Keep enough final calls to cover the first-pass shortlist. Follow-ups
+        # and renewed verification share a separate, capped budget.
+        reserve = max(1, self.budget * 2 // 5)
+        return {"initial": reserve, "final": reserve, "followup": self.budget - 2 * reserve}
+
     def call(self, phase, payload, images=()):
-        contract = INVESTIGATION if phase == "investigation" else FINAL
-        prompt = _POLICY + f"\nPhase: {phase}\n" + json_text(payload)
+        contract = (INVESTIGATION if phase in {"investigation", "reconsider"} else
+                    VERIFY if phase in {"verify", "verify_repair"} else FINAL)
+        guidance = {
+            "investigation": "Request specific evidence if necessary. Select means proceed to interval verification.",
+            "reconsider": "Use the newly retrieved evidence to update interpretation and required viewer groups before proposing a cut.",
+            "verify": "If the exact interval is flawed, request one boundary repair using one supplied observed evidence ID. "
+                      "Expand or contract only the named edge. Start uses the evidence start and end uses its end. "
+                      "Set repair_evidence_id to null for select, reject or unresolved.",
+            "verify_repair": "Assess the new interval from scratch. Select, reject, or abstain. Set repair_evidence_id to null.",
+        }.get(phase, "")
+        prompt = _POLICY + f"\nPhase: {phase}\n{guidance}\n" + json_text(payload)
         if len(prompt.encode("utf-8")) > 90_000:
             raise ValueError("Candidate evidence exceeds the bounded provider payload")
         key = artifact_key([prompt, contract, self.fingerprint])
@@ -88,9 +115,14 @@ class Reasoner:
                 self.cache_hits += 1
                 return answer
             timeout = min(120, self.deadline - monotonic())
-            if self.attempts >= self.budget - (phase == "investigation") or timeout < 1:
+            bucket = ("initial" if phase == "investigation" else "followup"
+                      if phase in {"reconsider", "verify_repair"} else "final")
+            blocked = (self.phases[bucket] >= self.allocation[bucket] if self.balanced else
+                       self.attempts >= self.budget - (phase == "investigation"))
+            if blocked or self.attempts >= self.budget or timeout < 1:
                 raise InvestigationBudget("Reasoning budget exhausted")
             self.attempts += 1
+            self.phases[bucket] += 1
             if images:
                 response = self.provider.complete_structured_frames(prompt, contract, list(images), timeout=timeout)
             else:
@@ -115,9 +147,14 @@ class Reasoner:
         cited = [*answer["supporting_ids"], *answer.get("interpretation_ids", []),
                  *(item for group in answer.get("viewer_groups", []) for item in group),
                  *(relation["evidence_id"] for relation in answer.get("relationships", []))]
+        if answer.get("repair_evidence_id"):
+            cited.append(answer["repair_evidence_id"])
         if set(cited) - allowed:
             raise ValueError("Provider cited unavailable evidence")
-        if answer["action"] == "select" and (not answer["supporting_ids"] or answer["critical_issues"]):
+        if answer["action"] in REPAIRS and not answer.get("repair_evidence_id"):
+            raise ValueError("The boundary repair must cite an observed evidence ID")
+        if answer["action"] == "select" and (not answer["supporting_ids"] or answer["critical_issues"] or
+                                               answer.get("repair_evidence_id")):
             raise ValueError("Provider selected a clip without sufficient cited evidence")
 
 
@@ -128,7 +165,8 @@ def evidence_view(rows: list[dict]) -> list[dict]:
 
 
 def provider_investigation(reasoner: Reasoner, memory: Memory, proposal: Proposal, candidate_id: str,
-                           investigation: dict, frames, *, hybrid: bool, allow_search: bool, duration: int) -> dict:
+                           investigation: dict, frames, *, hybrid: bool, allow_search: bool, duration: int,
+                           preferences: dict | None = None) -> dict:
     core = list(proposal.core_ids)
     ids = list(dict.fromkeys([*core, *investigation["local_context_ids"][:20],
                              *(hit["evidence_id"] for q in investigation["queries"] for hit in q["hits"]),
@@ -137,13 +175,39 @@ def provider_investigation(reasoner: Reasoner, memory: Memory, proposal: Proposa
                "lane": proposal.lane, "evidence": evidence_view(memory.hydrate(ids)),
                "ordered_image_ids": [row["id"] for row, _ in frames]}
     images = [pixels for _, pixels in frames]
+    if preferences:
+        payload["editorial_preferences"] = preferences
     answer = reasoner.call("investigation", payload, images)
-    additional = []
-    queries = []
-    for request in answer["queries"] if allow_search else []:
-        scope = request["scope"]
-        anchor = proposal.end_ms if scope == "future" else proposal.start_ms
-        hits = memory.search(request["query"], scope=scope, anchor=anchor, exclude=ids, limit=4, hybrid=hybrid)
-        queries.append({**request, "hits": hits})
-        additional.extend(hit["evidence_id"] for hit in hits)
-    return {"answer": answer, "queries": queries, "additional_ids": list(dict.fromkeys(additional))}
+    additional, queries, iterations = [], [], []
+    seen = set()
+    for turn in range(2 if reasoner.balanced else 1):
+        if answer["action"] == "reject":
+            break
+        fresh = []
+        for request in answer["queries"] if allow_search else []:
+            scope = request["scope"]
+            key = (scope, request["query"].casefold().strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            anchor = proposal.end_ms if scope == "future" else proposal.start_ms
+            hits = memory.search(request["query"], scope=scope, anchor=anchor, exclude=[*ids, *additional],
+                                 limit=4, hybrid=hybrid)
+            queries.append({**request, "hits": hits})
+            fresh.extend(hit["evidence_id"] for hit in hits)
+        fresh = list(dict.fromkeys(fresh))
+        additional.extend(fresh)
+        if not reasoner.balanced or not fresh:
+            break
+        iterations.append({"answer": answer, "retrieved_ids": fresh})
+        payload.update(previous_interpretation=answer, newly_retrieved_ids=fresh,
+                       evidence=evidence_view(memory.hydrate([*ids, *additional])))
+        try:
+            answer = reasoner.call("reconsider", payload, images)
+        except InvestigationBudget:
+            return {"answer": {**answer, "action": "unresolved",
+                               "stop_reason": "Follow-up budget exhausted before retrieved evidence could be assessed"},
+                    "queries": queries, "additional_ids": additional, "iterations": iterations}
+    if answer["action"] == "request_context":
+        answer = {**answer, "action": "unresolved", "stop_reason": "Required context remained unavailable"}
+    return {"answer": answer, "queries": queries, "additional_ids": additional, "iterations": iterations}

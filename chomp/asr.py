@@ -67,56 +67,67 @@ class LocalTranscriber:
                             compute_type="int8" if self.device == "cpu" else "float16")
 
     def transcribe(self, media: Path, start_ms: int, end_ms: int, audio_stream: int, *, words: bool) -> list[dict]:
-        import numpy as np
-
         rows = []
         for core_start in range(start_ms, end_ms, _CHUNK_MS):
             core_end = min(end_ms, core_start + _CHUNK_MS)
             begin = max(start_ms, core_start - _OVERLAP_MS)
             finish = min(end_ms, core_end + _OVERLAP_MS)
             raw = decode_audio_window(media, begin, finish, audio_stream=audio_stream)
-            samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-            if not samples.size or not np.any(np.abs(samples) > .0001):
-                continue
-            if self.quiet_gain:
-                # Boost quiet PCM for recognition while keeping the original recording and its clock.
-                size = 16_000
-                prior_gain = 1.0
-                for start in range(0, samples.size, size):
-                    block = samples[start:start + size]
-                    peak = float(np.max(np.abs(block)))
-                    gain = min(8.0, max(1.0, .18 / max(peak, .003))) if peak >= .003 else 1.0
-                    ramp = min(400, block.size)
-                    # Limit the ramp at a sudden transient following a quiet block.
-                    block[:ramp] *= np.linspace(min(prior_gain, gain), gain, ramp, dtype=np.float32)
-                    block[ramp:] *= gain
-                    prior_gain = gain
-            segments, _ = self.engine.transcribe(samples, vad_filter=True, beam_size=3,
-                                                 language=self.language, word_timestamps=words,
-                                                 condition_on_previous_text=False)
-            for segment in segments:
-                left = max(begin, begin + round(segment.start * 1000))
-                right = min(finish, begin + round(segment.end * 1000))
-                midpoint = (left + right) // 2
-                if right <= left or not core_start <= midpoint < core_end or not segment.text.strip():
+            for row in self.transcribe_pcm(raw, start_ms=begin, words=words):
+                midpoint = (row["start_ms"] + row["end_ms"]) // 2
+                if not core_start <= midpoint < core_end:
                     continue
-                row = {"start_ms": left, "end_ms": right, "text": segment.text.strip()}
-                if words and segment.words:
-                    timed_words = []
-                    for token in segment.words:
-                        text = token.word.strip()
-                        if not text or token.start is None or token.end is None:
-                            continue
-                        word_start = max(left, begin + round(token.start * 1000))
-                        word_end = min(right, begin + round(token.end * 1000))
-                        if word_end > word_start:
-                            timed_words.append({"start_ms": word_start, "end_ms": word_end,
-                                                "text": text, "confidence": token.probability})
-                    if timed_words and "".join(w["text"] for w in timed_words).replace(" ", "") == row["text"].replace(" ", ""):
-                        row["words"] = timed_words
-                if rows and row["text"] == rows[-1]["text"] and left < rows[-1]["end_ms"]:
+                if rows and row["text"] == rows[-1]["text"] and row["start_ms"] < rows[-1]["end_ms"]:
                     continue
                 rows.append(row)
+        return rows
+
+    def transcribe_pcm(self, raw: bytes, *, start_ms: int, words: bool) -> list[dict]:
+        """Recognize selected-track 16 kHz PCM, offset on the caller's source clock."""
+        import numpy as np
+
+        rows = []
+        begin = start_ms
+        finish = begin + len(raw) // 32
+        samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        if not samples.size or not np.any(np.abs(samples) > .0001):
+            return []
+        if self.quiet_gain:
+            # Boost quiet PCM for recognition while keeping the original recording and its clock.
+            size = 16_000
+            prior_gain = 1.0
+            for start in range(0, samples.size, size):
+                block = samples[start:start + size]
+                peak = float(np.max(np.abs(block)))
+                gain = min(8.0, max(1.0, .18 / max(peak, .003))) if peak >= .003 else 1.0
+                ramp = min(400, block.size)
+                # Limit the ramp at a sudden transient following a quiet block.
+                block[:ramp] *= np.linspace(min(prior_gain, gain), gain, ramp, dtype=np.float32)
+                block[ramp:] *= gain
+                prior_gain = gain
+        segments, _ = self.engine.transcribe(samples, vad_filter=True, beam_size=3,
+                                             language=self.language, word_timestamps=words,
+                                             condition_on_previous_text=False)
+        for segment in segments:
+            left = max(begin, begin + round(segment.start * 1000))
+            right = min(finish, begin + round(segment.end * 1000))
+            if right <= left or not segment.text.strip():
+                continue
+            row = {"start_ms": left, "end_ms": right, "text": segment.text.strip()}
+            if words and segment.words:
+                timed_words = []
+                for token in segment.words:
+                    text = token.word.strip()
+                    if not text or token.start is None or token.end is None:
+                        continue
+                    word_start = max(left, begin + round(token.start * 1000))
+                    word_end = min(right, begin + round(token.end * 1000))
+                    if word_end > word_start:
+                        timed_words.append({"start_ms": word_start, "end_ms": word_end,
+                                            "text": text, "confidence": token.probability})
+                if timed_words and "".join(w["text"] for w in timed_words).replace(" ", "") == row["text"].replace(" ", ""):
+                    row["words"] = timed_words
+            rows.append(row)
         return rows
 
     def cached(self, cache: Path, media: Path, source_id: str, duration_ms: int, audio_stream: int,

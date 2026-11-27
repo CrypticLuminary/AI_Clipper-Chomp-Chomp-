@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from .contract import read_json
+from ..clipcontrol import MAX_CLIPS
 
 
 def milliseconds(value: object) -> int:
@@ -80,8 +81,8 @@ def resolve_campaign(path: Path | None = None, **overrides) -> Campaign:
                 raise ValueError(f"{key} requires up to 30 short topic phrases")
             config[key] = tuple(value.strip() for value in values)
     campaign = Campaign(**config)
-    if type(campaign.clips) is not int or not 0 <= campaign.clips <= 3:
-        raise ValueError("clips must be an integer from 0 to 3")
+    if type(campaign.clips) is not int or not 0 <= campaign.clips <= MAX_CLIPS:
+        raise ValueError(f"clips must be an integer from 0 to {MAX_CLIPS}")
     for name in ("min_duration", "duration", "max_duration"):
         if type(getattr(campaign, name)) not in (int, float):
             raise ValueError(f"{name} must be numeric seconds")

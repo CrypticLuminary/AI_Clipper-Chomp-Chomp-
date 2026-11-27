@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from time import sleep
 
+from ..clipcontrol import ClipControl, MAX_CLIPS
 from ..artifacts import source_identity
 from .acquire import Jobs, Limits, acquire, assert_permission, reopen, verify_local
 from .live import LiveOptions, monitor_live, run_live
@@ -171,7 +172,8 @@ def command(group, argv):
         start.add_argument("--asr-model", help="installed Whisper model for incremental transcription")
         start.add_argument("--asr-device", choices=("cpu", "cuda"), default="cpu")
         start.add_argument("--audio-stream", type=int, default=0)
-        start.add_argument("--max-clips", type=int, choices=range(4), default=3)
+        start.add_argument("--max-clips", type=int, choices=range(MAX_CLIPS + 1), default=3)
+        start.add_argument("--requirements", type=Path, help="shared ClipControl JSON settings")
         start.add_argument("--min-ms", type=int, default=6000)
         start.add_argument("--max-ms", type=int, default=45000)
         start.add_argument("--hardware-profile", choices=("eco", "balanced", "gpu"), default="eco")
@@ -218,7 +220,8 @@ def command(group, argv):
         elif args.action == "start":
             value = args.input
             spool = args.from_dir or (Path(value) if not looks_remote(value) else None)
-            opts = LiveOptions(retention_seconds=args.retention_seconds, context_seconds=args.context_seconds,
+            req = ClipControl.parse(json.loads(args.requirements.read_text(encoding="utf-8-sig"))) if args.requirements else None
+            opts = LiveOptions(requirements=req, retention_seconds=args.retention_seconds, context_seconds=args.context_seconds,
                                lookahead_seconds=args.lookahead_seconds, poll_seconds=args.poll_seconds,
                                max_seconds=args.max_seconds, idle_seconds=args.idle_seconds, start_ms=args.start_ms,
                                broadcast_start=args.broadcast_start, max_buffer_bytes=args.buffer_mib * 1024**2,

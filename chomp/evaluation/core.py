@@ -16,6 +16,7 @@ import os
 import tempfile
 
 from ..artifacts import digest_file
+from ..clipcontrol import MAX_CLIPS
 
 SCHEMA = "clipledger/1"
 DECISIONS = {"good", "bad", "uncertain"}
@@ -110,8 +111,8 @@ def read_manifest(path: str | Path) -> Manifest:
         raw = [{**data, "candidate": {"start_ms": start, "end_ms": end, "anchor_ms": (start + end) // 2}}]
     else:
         raw = data.get("clips")
-    if not isinstance(raw, list) or len(raw) > 10:
-        raise ClipLedgerError("clips must be a list of at most 10 selected candidates")
+    if not isinstance(raw, list) or len(raw) > MAX_CLIPS:
+        raise ClipLedgerError(f"clips must be a list of at most {MAX_CLIPS} selected candidates")
     candidate_count = 1 if manual else _integer(data.get("candidate_count"), "candidate_count")
     count = 1 if manual else _integer(data.get("selected_for_review"), "selected_for_review")
     if count != len(raw) or candidate_count < len(raw):

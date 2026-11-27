@@ -297,7 +297,7 @@ def _composite(inp: str, dst: str, seg: LayoutSegment, width: int, height: int, 
                 f"[{label}bg]{scale(blur_w, blur_h, True)},gblur=sigma=10,"
                 f"eq=brightness=-0.19:saturation=0.55,scale={width}:{height},setsar=1[{label}blur];"
                 f"[{label}blur][{label}fit]overlay=(W-w)/2:(H-h)/2,format=yuv420p{dst}")
-    return f"{inp}{game_crop}{scale(width, height, seg.layout == 'gameplay-only')},format=yuv420p{dst}"
+    return f"{inp}{game_crop}{scale(width, height, seg.layout == 'gameplay-only' and not seg.preserve_gameplay)},format=yuv420p{dst}"
 
 
 def _hook_ass(title: str, width: int, height: int, y: int, length_ms: int) -> str:
@@ -337,6 +337,7 @@ def render_preview(
     caption_position: str = "lower", audio_profile: str = "original", shorts: bool = False,
     hook: str | None = None, sound_cues: tuple[SoundCue, ...] = (),
     shot_plan: dict | None = None, shot_evidence: dict | None = None,
+    prefer_nvenc: bool = False,
 ) -> dict | None:
     """Render one continuous audio program and return technical evidence for ShotPlans."""
     def file_version(path: Path) -> tuple[int, ...]:
@@ -550,7 +551,18 @@ def render_preview(
                 "-ar", "48000", "-ac", "2", "-disposition:a:0", "default",
                 "-movflags", "+faststart", str(staged)]
         timeout = max(60, (end_ms - start_ms) / 1000 * 12)
-        exec_checked(args, cwd=scratch, timeout=timeout)
+        used_encoder = "libx264"
+        if prefer_nvenc and compiled_shots is None:
+            left, right = args.index("-c:v"), args.index("-pix_fmt")
+            hardware = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
+                        "-cq", "20" if width >= 1080 else "23", "-b:v", "0"]
+            try:
+                exec_checked([*args[:left], *hardware, *args[right:]], cwd=scratch, timeout=timeout)
+                used_encoder = "h264_nvenc"
+            except RuntimeError:
+                exec_checked(args, cwd=scratch, timeout=timeout)
+        else:
+            exec_checked(args, cwd=scratch, timeout=timeout)
         rendered = probe(staged)
         outvideo = next((s for s in rendered["streams"] if s.get("codec_type") == "video"), {})
         if (outvideo.get("codec_name"), outvideo.get("width"), outvideo.get("height")) != ("h264", width, height):
@@ -590,4 +602,4 @@ def render_preview(
         if compiled_shots is not None and file_version(source) != source_version:
             raise ValueError("Source changed during ShotPlan rendering")
         staged.replace(output)
-    return shot_report
+    return shot_report if shot_report is not None else {"encoder": used_encoder} if prefer_nvenc else None

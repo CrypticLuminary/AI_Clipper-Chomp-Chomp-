@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from .models import Candidate
+from .clipcontrol import MAX_CLIPS
 
 SCORE_KEYS = ("category_payoff", "standalone_clarity", "hook_strength", "distinctiveness")
 CATEGORIES = {"funny", "surprise", "fail", "dispute", "discovery", "informative", "emotional", "other"}
@@ -63,8 +64,8 @@ def duplicate(a: Candidate, b: Candidate, overlap_threshold: float = .25) -> boo
 
 def select(candidates: list[Candidate], max_clips: int=3, min_score: float=45, overlap_threshold: float=.25) -> list[Candidate]:
     """Rank FIRST, suppress overlapping lower-ranked duplicates second, allow zero clips."""
-    if type(max_clips) is not int or not 0 <= max_clips <= 3:
-        raise ValueError("Choose between zero and three review clips")
+    if type(max_clips) is not int or not 0 <= max_clips <= MAX_CLIPS:
+        raise ValueError(f"Choose between zero and {MAX_CLIPS} review clips")
     if max_clips == 0:
         return []
     if not 0 <= min_score <= 100 or any(not 0 <= candidate.score <= 100 for candidate in candidates):

@@ -1,7 +1,7 @@
 """Local VOD analysis, clip decisions, and review export."""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from contextlib import closing
 import json
@@ -14,6 +14,7 @@ from time import perf_counter
 from .artifacts import artifact_key, artifact_lock, digest_file, source_identity, write_json
 from .asr import LocalTranscriber
 from .boundaries import refine_boundaries
+from .clipcontrol import ClipControl, MAX_CLIPS
 from .clipwork import PROFILES, SCHEMA, create_clip, read_layout_plan, review_page
 from .discovery import discover
 from .editorial import EditorialProvider, context_for, judge_cached, story_boundary
@@ -76,12 +77,25 @@ def process(
     saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
     camera_motion: str = "pan", camera_fit: str = "auto",
     burn_hook: bool = False, evolution: EvolutionConfig | None = None, evolution_provider=None, source_link: dict | None = None,
+    requirements: ClipControl | None = None, progress=None,
 ) -> dict:
     started = perf_counter()
+    tick = progress or (lambda stage, **info: None)
+    if requirements is not None:
+        limit, layout, audio_stream = requirements.clips, requirements.layout, requirements.audio_stream
+        facecam_roi, gameplay_roi = requirements.facecam_roi, requirements.gameplay_roi
+        caption_position, audio_profile = requirements.caption_position, requirements.audio_profile
+        proposals_per_hour = requirements.proposals_per_hour
+        if requirements.engine == "evolution":
+            evolution = replace(evolution or EvolutionConfig(), profile=requirements.hardware,
+                                min_ms=requirements.bounds[0], max_ms=requirements.bounds[1],
+                                reasoning_calls=requirements.calls, reasoning_seconds=requirements.reasoning_seconds)
+        else:
+            evolution = None
     if not rights_ref.strip():
         raise ValueError("A nonempty rights reference is required")
-    if type(limit) is not int or not 0 <= limit <= 3 or not 0 <= min_score <= 100:
-        raise ValueError("limit must be 0..3 and score threshold 0..100")
+    if type(limit) is not int or not 0 <= limit <= MAX_CLIPS or not 0 <= min_score <= 100:
+        raise ValueError(f"limit must be 0..{MAX_CLIPS} and score threshold 0..100")
     if not 1 <= semantic_budget <= 120 or type(semantic_budget) is not int:
         raise ValueError("Semantic budget must be an integer between 1 and 120")
     if profile not in PROFILES:
@@ -93,6 +107,8 @@ def process(
     output_root = output_root.expanduser().resolve()
     meta = probe(media)
     duration_ms = meta["duration_ms"]
+    if requirements:
+        requirements.source_range(duration_ms)
     check_audio_track(meta, audio_stream)
     source_id = source_identity(media)
     if source_link is not None and source_link.get("media_id", source_id) != source_id:
@@ -131,6 +147,8 @@ def process(
         "editorial_provider": provider.fingerprint if provider else None, "semantic_budget": semantic_budget,
         "camera_slot": camera_slot, "burn_hook": burn_hook,
     }
+    if requirements:
+        config["requirements"] = asdict(requirements)
     if source_link is not None:
         config["source_link"] = source_link
     if evolution is not None:
@@ -171,6 +189,7 @@ def process(
                              "(job_id TEXT PRIMARY KEY, source TEXT, status TEXT, modified_utc TEXT, manifest TEXT)")
             _job_status(database, job_id, media, manifest_path, "running")
             try:
+                tick("transcribing" if internal_asr else "reading_transcript")
                 asr_started = perf_counter()
                 diagnostics_asr = asr_signature
                 if transcript_path:
@@ -203,6 +222,7 @@ def process(
                 if evolution is not None and internal_asr and transcriber:
                     diagnostics["asr_cache_hit"] = transcriber.last_cache_hit
 
+                tick("analyzing", utterances=len(transcript), source_duration_ms=duration_ms)
                 analysis_started = perf_counter()
                 audio_error = None
                 try:
@@ -226,7 +246,7 @@ def process(
                         asr={"producer": "transcript-sidecar/1", "sha256": config["transcript"]} if transcript_path
                             else diagnostics_asr or {"producer": "missing-asr"},
                         provider=evolution_provider, proposals_per_hour=proposals_per_hour,
-                        limit=limit, min_score=min_score,
+                        limit=limit, min_score=min_score, requirements=requirements, progress=tick,
                     )
                     diagnostics.update(evolution_report["timing"])
                     if asr_error:
@@ -244,7 +264,9 @@ def process(
                             contained, candidate.start_ms, candidate.end_ms, main_speaker_id)
                         row["candidate"]["speaker_context"] = candidate.speaker_context
                 else:
-                    candidates = discover(observations, transcript, duration_ms, proposals_per_hour=proposals_per_hour)
+                    tick("discovering")
+                    density = min(240, max(proposals_per_hour, limit * 8)) if requirements else proposals_per_hour
+                    candidates = discover(observations, transcript, duration_ms, proposals_per_hour=density)
                     diagnostics.update(audio_cache_hit=audio_cached, discovery_seconds=round(perf_counter() - analysis_started, 3))
 
                     ranking_started = perf_counter()
@@ -295,6 +317,13 @@ def process(
                         else:
                             heuristic_rank(candidate)
                         candidate.validate(duration_ms)
+                        if reason == "eligible" and requirements:
+                            try:
+                                requirements.check_span(c0, c1, duration_ms)
+                                if not requirements.permits_text(candidate.transcript_excerpt):
+                                    reason = "excluded_content"
+                            except ValueError:
+                                reason = "outside_requirements"
                         if reason == "eligible":
                             if candidate.score < min_score:
                                 reason = "below_threshold"
@@ -329,6 +358,8 @@ def process(
 
                     assets = []
                     for i, candidate in enumerate(selected, 1):
+                        tick("rendering" if render else "preparing_review", produced=len(assets), selected=len(selected),
+                             candidates=len(candidates), current_clip=i)
                         record = by_object[id(candidate)]
                         clip_work = work
                         if evolution is not None:
@@ -373,6 +404,7 @@ def process(
                                 shorts_style=layout == "shorts",
                                 title=title, title_source="cited_dialogue", burn_hook=burn_hook,
                                 **({"source_link": source_link} if source_link is not None else {}),
+                                **({"requirements": requirements} if requirements is not None else {}),
                             )
                         except (OSError, ValueError, RuntimeError) as exc:
                             if evolution is None:
@@ -424,6 +456,9 @@ def process(
                         "clips": assets, "manual_review_required": True, "auto_publishing": False,
                         "timing": diagnostics, "provenance": config,
                     }
+                    if requirements:
+                        manifest["requirements"] = requirements.public()
+                        manifest["count_result"] = requirements.export_summary(len(assets), (r["decision"] for _, r in records))
                     review_page(work / "review.html", assets, "Chomp-Chomp clip review")
                     if evolution_report is not None:
                         manifest.update(engine="evolution", evolution_evidence=str(job_dir / "evolution_evidence.json"),

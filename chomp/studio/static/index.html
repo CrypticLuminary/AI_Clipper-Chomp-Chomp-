@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11131a">
+  <meta name="description" content="Chomp-Chomp Studio finds and renders reviewable clips from authorized recordings.">
+  <title>Chomp-Chomp Studio</title>
+  <link rel="stylesheet" href="/studio.css">
+  <script defer src="/studio.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="logo" aria-hidden="true">CC</span><span>Chomp-Chomp <strong>Studio</strong></span></a>
+    <nav aria-label="Workspace"><a href="#source-panel">Create</a><a href="#activity">Activity</a><a href="#results">Results</a></nav>
+    <span class="local"><span aria-hidden="true"></span> Local workspace</span>
+  </header>
+  <main>
+    <div class="hero">
+      <div><h1>Make clips</h1><p>Choose a recording, set the cut, and review playable previews.</p></div>
+      <a class="aux-link" href="#activity">View job history</a>
+    </div>
+
+    <form id="job-form">
+      <div class="layout">
+        <section class="panel" id="source-panel" aria-labelledby="source-heading">
+          <div class="panel-head"><div><h2 id="source-heading">Source</h2><p>Start with an authorized recording or creator feed.</p></div>
+            <fieldset class="toggle"><legend class="sr">Source mode</legend>
+              <label><input name="source-mode" type="radio" value="recording" checked><span>Recording</span></label>
+              <label><input name="source-mode" type="radio" value="live"><span>Live feed</span></label>
+            </fieldset>
+          </div>
+          <div class="panel-body">
+            <label for="source-url">Twitch or YouTube URL</label>
+            <div class="inline"><input id="source-url" type="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off"><button type="button" id="inspect-button" class="secondary">Inspect</button></div>
+            <div id="source-info" class="source-info" hidden></div>
+            <div id="recording-fields">
+              <label class="file-area" for="video-file"><span class="file-glyph" aria-hidden="true">+</span><span><strong>Choose a local recording</strong><small id="video-name">MP4, MOV, MKV, WebM or TS</small></span></label>
+              <input id="video-file" class="sr" type="file" accept=".mp4,.mov,.mkv,.webm,.ts,.avi,.m4v">
+              <details><summary>Other media and transcript options</summary>
+                <label for="media-url">Authorized HTTPS recording</label><input id="media-url" type="url" placeholder="https://creator.example/original.mp4">
+                <label class="check"><input id="twitch-download" type="checkbox"> Use a permitted Twitch clip download</label>
+                <label for="transcript-file">Source-clock transcript JSON</label><input id="transcript-file" type="file" accept=".json">
+              </details>
+            </div>
+            <div id="live-fields" hidden>
+              <label for="feed-url">Authorized HLS media playlist</label><input id="feed-url" type="url" placeholder="https://creator.example/live/index.m3u8">
+              <label for="live-seconds">Capture limit in seconds</label><input id="live-seconds" type="number" min="1" max="3600" value="300">
+            </div>
+            <div class="rights">
+              <label for="rights-ref">Permission reference</label><input id="rights-ref" maxlength="1000" placeholder="Creator supplied the original" required>
+              <label class="check"><input type="checkbox" id="permission" required> I have permission to process this media.</label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="requirements-heading">
+          <div class="panel-head"><div><h2 id="requirements-heading">Clip requirements</h2><p>Selections still need to be distinct and understandable.</p></div>
+            <select id="preset" aria-label="Apply a preset"><option value="">Presets</option><option value="shorts">Shorts</option><option value="story">Story</option><option value="landscape">Landscape</option></select>
+          </div>
+          <div class="panel-body specs">
+            <div class="grid-two"><div><label for="clip-count">Clip count</label><input id="clip-count" type="number" min="1" max="20" value="3" required></div>
+              <div><label for="count-mode">Count mode</label><select id="count-mode"><option value="UP_TO">Up to</option><option value="TARGET">Target</option></select></div></div>
+            <div class="grid-three">
+              <div><label for="duration-min">Min seconds</label><input id="duration-min" type="number" min="1" max="60" step=".001" value="6" required></div>
+              <div><label for="duration-max">Max seconds</label><input id="duration-max" type="number" min="1" max="60" step=".001" value="45" required></div>
+              <div><label for="duration-pref">Preferred</label><input id="duration-pref" type="number" min="1" max="60" step=".001" placeholder="Auto"></div>
+            </div>
+            <div class="grid-two">
+              <div><label for="aspect">Aspect ratio</label><select id="aspect"><option>9:16</option><option>16:9</option><option>1:1</option></select></div>
+              <div><label for="resolution">Resolution</label><select id="resolution"><option value="540">540 px short edge</option><option value="720">720 px short edge</option><option value="1080">1080 px short edge</option></select></div>
+              <div><label for="layout">Layout</label><select id="layout"><option value="shorts">Automatic Shorts</option><option value="fit">Fit source</option><option value="gameplay-only">Fill frame</option><option value="letterbox">Full-source review</option></select></div>
+              <div><label for="audio">Audio</label><select id="audio"><option value="original">Original levels</option><option value="balanced">Normalize</option></select></div>
+            </div>
+            <label class="check"><input type="checkbox" id="captions" checked> Burn in captions</label>
+            <label for="instructions">Editorial instructions</label><textarea id="instructions" rows="2" maxlength="4000" placeholder="Favor the setup and payoff of each story."></textarea>
+            <details><summary>Advanced processing</summary>
+              <div class="grid-two">
+                <div><label for="campaign-min">Campaign min seconds</label><input id="campaign-min" type="number" min="1" max="60" value="1"></div>
+                <div><label for="campaign-max">Campaign max seconds</label><input id="campaign-max" type="number" min="1" max="60" value="60"></div>
+                <div><label for="source-start">Source start seconds</label><input id="source-start" type="number" min="0" step=".001" placeholder="Start"></div>
+                <div><label for="source-end">Source end seconds</label><input id="source-end" type="number" min="0" step=".001" placeholder="End"></div>
+                <div><label for="hardware">Hardware profile</label><select id="hardware"><option value="eco">Eco</option><option value="balanced">Balanced</option><option value="gpu">GPU (if configured)</option></select></div>
+                <div><label for="asr-device">Whisper device</label><select id="asr-device"><option value="cpu">CPU</option><option value="cuda">CUDA with CPU fallback</option></select></div>
+                <div><label for="audio-track">Audio track index</label><input id="audio-track" type="number" min="0" max="63" value="0"></div>
+                <div><label for="reasoning-calls">Reasoning call limit</label><input id="reasoning-calls" type="number" min="2" max="120" placeholder="Auto"></div>
+              </div>
+              <label for="preset-name">Save these requirements</label>
+              <div class="inline"><input id="preset-name" maxlength="40" placeholder="Preset name"><button id="save-preset" type="button" class="secondary">Save preset</button></div>
+              <label for="provider-model">Director model</label><input id="provider-model" placeholder="Optional installed Codex provider">
+              <label class="check"><input id="provider-confirmed" type="checkbox"> Allow the named provider to inspect bounded source evidence.</label>
+            </details>
+          </div>
+        </section>
+      </div>
+      <div class="form-footer"><p id="form-message" role="status">Review exports use MP4 with H.264 and AAC.</p><button type="submit" class="primary" id="start-job">Start processing</button></div>
+    </form>
+
+    <div class="workspace-bottom">
+      <section class="panel activity" id="activity" aria-labelledby="activity-heading">
+        <div class="panel-head"><div><h2 id="activity-heading">Activity</h2><p>Processing stages and recent jobs.</p></div><button id="refresh-jobs" class="secondary" type="button">Refresh</button></div>
+        <div class="panel-body">
+          <div id="status" role="status" aria-live="polite" class="status"><strong>No job selected</strong><p>Submit a recording to see processing details here.</p></div>
+          <div class="job-actions"><button id="cancel-job" type="button" class="secondary" hidden>Cancel</button><button id="retry-job" type="button" class="secondary" hidden>Retry</button></div>
+          <ol id="events" class="events" aria-label="Stages"></ol>
+          <div id="jobs" class="jobs"></div>
+        </div>
+      </section>
+      <section class="panel results" id="results" aria-labelledby="results-heading">
+        <div class="panel-head"><div><h2 id="results-heading">Results</h2><p>Play, trim, and review your exports.</p></div><a id="download-all" class="secondary" hidden>Download ZIP</a></div>
+        <div class="panel-body"><p id="result-note">Clips will appear here after rendering.</p><div id="clip-list" class="clip-list"></div></div>
+      </section>
+    </div>
+  </main>
+  <dialog id="edit-dialog">
+    <form id="edit-form">
+      <h2>Trim and reframe</h2><p>Times use the recording clock.</p>
+      <div class="grid-two"><div><label for="edit-start">Source start seconds</label><input id="edit-start" type="number" min="0" step=".001" required></div>
+        <div><label for="edit-end">Source end seconds</label><input id="edit-end" type="number" min="0" step=".001" required></div></div>
+      <div class="inline"><button id="load-frame" type="button" class="secondary">Load source frame</button><select id="region-type" aria-label="Region type"><option value="facecam_roi">Streamer</option><option value="gameplay_roi">Gameplay</option><option value="protected_hud_roi">Protected HUD</option></select></div>
+      <canvas id="frame-canvas" hidden aria-label="Source frame for region selection"></canvas>
+      <p id="region-note">Drag on the frame to mark a region.</p>
+      <p id="edit-error" role="status"></p>
+      <div class="inline"><button id="close-edit" type="button" class="secondary">Close</button><button type="submit" class="primary" id="revise">Rerender clip</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

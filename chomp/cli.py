@@ -8,6 +8,7 @@ import sys
 
 from . import __version__
 from .clipwork import approve
+from .clipcontrol import ClipControl, MAX_CLIPS
 from .editorial import OllamaProvider
 from .manual import render_manual_preview, rerender
 from .pipeline import process
@@ -64,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     from .streambridge.cli import command as source_command, media_options, prepare_input
     from .streambridge.source import BridgeError, looks_remote
 
+    if argv and argv[0] in {"serve", "job"}:
+        from .studio.cli import command
+        return command(argv[0], argv[1:])
     if argv and argv[0] in {"source", "live", "youtube", "twitch"}:
         return source_command(argv[0], argv[1:])
     if argv and argv[0] == "clip":
@@ -128,8 +132,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--asr-device", choices=["cpu", "cuda"], default="cpu")
     p.add_argument("--language", help="optional Whisper language code")
     p.add_argument("--min-score", type=float, default=45)
-    p.add_argument("--max-clips", type=int, choices=range(4), default=3)
+    p.add_argument("--max-clips", type=int, choices=range(MAX_CLIPS + 1), default=3)
     p.add_argument("--proposals-per-hour", type=int, default=40)
+    p.add_argument("--requirements", type=Path, help="shared ClipControl JSON settings")
+    p.add_argument("--count-mode", choices=("TARGET", "UP_TO"))
     p.add_argument("--semantic-model", help="optional installed local Ollama GGUF model")
     p.add_argument("--semantic-port", type=int, default=11434)
     p.add_argument("--semantic-budget", type=int, default=12, help="max candidate judgments per VOD")
@@ -156,6 +162,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--render", action="store_true", help="render MP4s for review")
     _render_options(p)
     args = p.parse_args(argv)
+    requirements = None
+    try:
+        values = json.loads(args.requirements.read_text(encoding="utf-8-sig")) if args.requirements else None
+        if args.count_mode:
+            values = {**(values if values is not None else {"clips": args.max_clips, "engine": args.engine,
+                "min_ms": args.evolution_min_ms, "max_ms": args.evolution_max_ms, "layout": args.layout,
+                "audio_stream": args.audio_stream, "hardware": args.hardware_profile,
+                "resolution": 1080 if args.profile == "final" else 540}), "mode": args.count_mode}
+        if values is not None:
+            requirements = ClipControl.parse(values)
+            args.engine = requirements.engine
+    except (ValueError, TypeError, OSError) as exc:
+        p.error(str(exc))
     if not args.acknowledge_permission:
         p.error("--acknowledge-permission is required")
     if args.facecam_model is not None and args.layout not in {"shorts", "auto-facecam"}:
@@ -226,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
                 title=args.title, burn_hook=args.burn_hook, sound_cues_path=args.sound_cues,
                 subject_plan_path=args.subject_plan, streamer_anchor=anchor,
                 **({"source_link": link.provenance()} if link else {}),
+                **({"requirements": requirements} if requirements else {}),
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
             _print({"source": "URL input" if looks_remote(args.input[0]) else args.input[0], "error": str(exc),
@@ -279,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
                 semantic_budget=args.semantic_budget, burn_hook=args.burn_hook, evolution=evolution,
                 evolution_provider=evolution_provider, **shared,
                 **({"source_link": link.provenance()} if link else {}),
+                **({"requirements": requirements} if requirements else {}),
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
             _print({"source": safe_source, "error": str(exc),
@@ -291,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
                 "review_clips": result["selected_for_review"], "review_page": result["review_page"],
                 "candidate_ledger": result["candidate_ledger"], "reused_job": result.get("reused_job", False),
                 "review_queue": str(args.output.resolve() / result["job_id"] / "review_queue.json"),
+                **({"count_result": result["count_result"]} if "count_result" in result else {}),
                 **({"source_link": result["source_link"]} if "source_link" in result else {}),
                 **({"evidence": result["evolution_evidence"], "analysis_status": result["analysis_status"]}
                    if result.get("engine") == "evolution" else {})})

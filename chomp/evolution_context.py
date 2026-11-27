@@ -101,9 +101,11 @@ def investigate(memory: Memory, proposal: Proposal, search: bool, hybrid: bool) 
 
 
 def close(memory: Memory, proposal: Proposal, groups: list[list[str]], *, duration: int,
-          minimum: int, maximum: int, audio: list[float], hop: int, snap: bool) -> tuple[BoundaryDecision | None, list[dict]]:
+          minimum: int, maximum: int, audio: list[float], hop: int, snap: bool, preferred: int | None = None,
+          bounds: tuple[int, int] | None = None, exact: tuple[int, int] | None = None) -> tuple[BoundaryDecision | None, list[dict]]:
     """Each group is an alternative sufficient set, with mandatory core in every interval."""
     options = []
+    lower, upper = bounds or (0, duration)
     for group in groups:
         rows = memory.hydrate([*proposal.core_ids, *group])
         start = min([proposal.start_ms, *(r["start_ms"] for r in rows)])
@@ -112,15 +114,28 @@ def close(memory: Memory, proposal: Proposal, groups: list[list[str]], *, durati
         nearby = memory.around(max(0, start - 2500), min(duration, end + 2500))
         starts = {start, *(r["start_ms"] for r in nearby if r["start_ms"] <= start)}
         ends = {end, *(r["end_ms"] for r in nearby if r["end_ms"] >= end)}
-        if end - start < minimum:
+        if end - start < minimum and preferred is None:
             missing = minimum - (end - start)
             padded_start = max(0, min(start - missing // 2, duration - minimum))
             starts.add(padded_start)
             ends.add(padded_start + minimum)
+        if exact:
+            starts, ends = {exact[0]}, {exact[1]}
+
+        def preference(pair):
+            left, right = pair
+            if preferred is None:
+                return right - left, left
+            spoken = memory.around(left, right)
+            opening = bool(spoken and needs_setup(spoken[0]["text"]))
+            ending = bool(spoken and not re.search(r"""[.!?]["'”’)]*\s*$""", spoken[-1]["text"]))
+            return (int(opening) * 6500 + int(ending) * 3500 + abs(right - left - preferred)
+                    + (required_start - left + right - required_end) * .30, right - left, left)
+
         candidates = []
         for left in sorted(starts, reverse=True)[:16]:
             for right in sorted(ends)[:16]:
-                if not 0 <= left <= required_start < required_end <= right <= duration:
+                if not lower <= left <= required_start < required_end <= right <= upper:
                     continue
                 if not minimum <= right - left <= maximum:
                     continue
@@ -130,22 +145,22 @@ def close(memory: Memory, proposal: Proposal, groups: list[list[str]], *, durati
         if not candidates:
             options.append({"required_ids": group, "state": "no_contiguous_interval", "required_span_ms": [start, end]})
             continue
-        left, right = min(candidates, key=lambda t: (t[1] - t[0], t[0]))
-        adjusted = _silence_snap(left, right, proposal.anchor, audio, hop, duration) if snap else (left, right, False)
+        left, right = min(candidates, key=preference)
+        adjusted = _silence_snap(left, right, proposal.anchor, audio, hop, duration) if snap and not exact else (left, right, False)
         x, y, changed = adjusted
         # Only retain technical snapping in speech-free gaps and recheck every hard bound.
-        safe = (0 <= x <= required_start < required_end <= y <= duration and minimum <= y - x <= maximum
+        safe = (lower <= x <= required_start < required_end <= y <= upper and minimum <= y - x <= maximum
                 and not any(r["start_ms"] < x < r["end_ms"] or r["start_ms"] < y < r["end_ms"]
                             for r in memory.around(x - 1, y + 1))
                 and [r["id"] for r in memory.around(x, y)] == [r["id"] for r in memory.around(left, right)])
         options.append({"required_ids": group, "state": "feasible", "semantic_span_ms": [left, right],
                         "final_span_ms": [x, y] if changed and safe else [left, right],
+                        "preference": preference((left, right)),
                         "technical_snap": "retained" if changed and safe else "discarded" if changed else "unchanged"})
     feasible = [o for o in options if o["state"] == "feasible"]
     if not feasible:
         return None, options
-    selected = min(feasible, key=lambda o: (o["semantic_span_ms"][1] - o["semantic_span_ms"][0],
-                                            o["semantic_span_ms"][0]))
+    selected = min(feasible, key=lambda o: o["preference"])
     return BoundaryDecision(*selected["final_span_ms"], "evolution_context_closure",
                             "Core and one sufficient viewer-context group retained"), options
 
