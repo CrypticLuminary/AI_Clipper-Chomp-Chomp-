@@ -79,12 +79,34 @@ def main(argv: list[str] | None = None) -> int:
         from .shotcomposer.__main__ import main as shots_main
 
         return shots_main(argv[1:])
+    if argv and argv[0] in {"hardware", "evolution-feedback", "evolution-train"}:
+        from .evolution_feedback import command
+        return command(argv[0], argv[1:])
     p = argparse.ArgumentParser(prog="chomp", description="Find and review highlights from authorized local VODs",
                                 epilog="Use chomp clip for Director selection. Review commands: chomp rerender, "
                                        "chomp approve, chomp director, and chomp shots")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--input", action="append", required=True, metavar="LOCAL_VIDEO", help="local VOD file; repeat for batch")
     p.add_argument("--output", type=Path, default=Path("outputs"))
+    p.add_argument("--engine", choices=["heuristic", "evolution"], default="heuristic")
+    p.add_argument("--hardware-profile", choices=["eco", "balanced", "gpu"], default="eco")
+    p.add_argument("--evolution-disable", action="append", default=[], choices=[
+        "dialogue", "acoustic", "visual", "chat", "exploration", "memory", "hybrid", "snap", "local-review", "quiet-asr"])
+    p.add_argument("--evolution-visual-model", type=Path, help="local pinned CLIP vision .onnx file")
+    p.add_argument("--evolution-max-semantic-frames", type=int)
+    p.add_argument("--evolution-retry", metavar="TAG", help="make a separate review job while reusing analysis caches")
+    p.add_argument("--evolution-min-free-mb", type=int, default=128)
+    p.add_argument("--evolution-embeddings", type=Path, help="local pinned MiniLM directory")
+    p.add_argument("--evolution-audio-model", type=Path, help="local pinned YAMNet .tflite file")
+    p.add_argument("--evolution-interest-model", type=Path, help="specific human-trained model version")
+    p.add_argument("--evolution-director-model", help="opt in to sending bounded evidence to subscription Codex CLI")
+    p.add_argument("--evolution-reasoning-calls", type=int, default=8)
+    p.add_argument("--evolution-reasoning-seconds", type=int, default=600)
+    p.add_argument("--evolution-min-ms", type=int, default=6000)
+    p.add_argument("--evolution-max-ms", type=int, default=45000)
+    p.add_argument("--evolution-max-frames", type=int)
+    p.add_argument("--evolution-max-audio-windows", type=int)
+    p.add_argument("--evolution-memory-mb", type=int, default=128)
     p.add_argument("--rights-ref", required=True, help="creator authorization or campaign permission reference")
     p.add_argument("--acknowledge-permission", action="store_true")
     p.add_argument("--transcript", type=Path, help="JSON segments in source seconds or integer milliseconds")
@@ -203,6 +225,27 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--title applies to an exact manual interval or a rerender")
     if args.sound_cues is not None:
         p.error("--sound-cues applies to an exact manual interval or a rerender")
+    evolution = evolution_provider = None
+    if args.engine == "evolution":
+        from .evolution import EvolutionConfig
+        from .director.provider import CodexCLI
+        if args.semantic_model:
+            p.error("Use --evolution-director-model for EVOLUTION structured reasoning")
+        try:
+            evolution = EvolutionConfig(
+                profile=args.hardware_profile, disabled=tuple(sorted(set(args.evolution_disable))),
+                embeddings=args.evolution_embeddings, audio_model=args.evolution_audio_model,
+                visual_model=args.evolution_visual_model, max_semantic_frames=args.evolution_max_semantic_frames,
+                retry=args.evolution_retry, min_free_mb=args.evolution_min_free_mb,
+                min_ms=args.evolution_min_ms, max_ms=args.evolution_max_ms, model=args.evolution_interest_model,
+                reasoning_calls=args.evolution_reasoning_calls, reasoning_seconds=args.evolution_reasoning_seconds,
+                max_frames=args.evolution_max_frames, max_audio_windows=args.evolution_max_audio_windows,
+                memory_mb=args.evolution_memory_mb,
+            )
+            if args.evolution_director_model:
+                evolution_provider = CodexCLI(args.evolution_director_model)
+        except ValueError as exc:
+            p.error(str(exc))
     try:
         provider = OllamaProvider(args.semantic_model, port=args.semantic_port) if args.semantic_model else None
     except ValueError as exc:
@@ -216,14 +259,19 @@ def main(argv: list[str] | None = None) -> int:
                 main_speaker_id=args.main_speaker_id, transcribe=args.transcribe,
                 refine_captions=args.refine_captions, min_score=args.min_score, limit=args.max_clips, render=args.render,
                 proposals_per_hour=args.proposals_per_hour, editorial_provider=provider,
-                semantic_budget=args.semantic_budget, burn_hook=args.burn_hook, **shared,
+                semantic_budget=args.semantic_budget, burn_hook=args.burn_hook, evolution=evolution,
+                evolution_provider=evolution_provider, **shared,
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
             _print({"source": src, "error": str(exc)})
             failures += 1
             continue
+        if result.get("engine") == "evolution" and result.get("analysis_status") == "partial":
+            failures += 1
         _print({"job_id": result["job_id"], "source": src, "candidates": result["candidate_count"],
                 "review_clips": result["selected_for_review"], "review_page": result["review_page"],
                 "candidate_ledger": result["candidate_ledger"], "reused_job": result.get("reused_job", False),
-                "review_queue": str(args.output.resolve() / result["job_id"] / "review_queue.json")})
+                "review_queue": str(args.output.resolve() / result["job_id"] / "review_queue.json"),
+                **({"evidence": result["evolution_evidence"], "analysis_status": result["analysis_status"]}
+                   if result.get("engine") == "evolution" else {})})
     return int(failures != 0)

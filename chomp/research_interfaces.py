@@ -18,7 +18,8 @@ from .editorial_selection import span, text
 from .media import check_audio_track, exec_checked, probe
 
 MODALITIES = {"utterance", "acoustic_event", "chat_reaction", "visual_frame", "motion",
-              "subject_track", "visual_region", "scene_transition", "ocr"}
+              "subject_track", "visual_region", "scene_transition", "ocr", "speaker_turn",
+              "acoustic_measurement", "semantic_unit", "visual_state"}
 
 
 def validate_evidence(row: dict, source_id: str, duration_ms: int) -> dict:
