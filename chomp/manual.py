@@ -36,6 +36,7 @@ def render_manual_preview(
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
     sound_cues_path: Path | None = None, saved_sound_cues: list[dict] | None = None,
     subject_plan_path: Path | None = None, streamer_anchor: StreamerAnchor | None = None,
+    source_link: dict | None = None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -50,7 +51,8 @@ def render_manual_preview(
     checked_span(start_ms, end_ms, duration_ms)
     check_audio_track(meta, audio_stream)
     source_id = source_identity(source)
-    if expected_source_id and source_id != expected_source_id:
+    if (expected_source_id and source_id != expected_source_id) or (
+            source_link is not None and source_link.get("media_id", source_id) != source_id):
         raise ValueError("Source recording changed since the edit plan was generated")
     if layout_plan is not None and layout_segments_override is not None:
         raise ValueError("Supply one layout plan")
@@ -90,6 +92,8 @@ def render_manual_preview(
             config["vision"]["subject"] = {"revision": TRACK_REVISION, "plan": asdict(subject_plan)}
     elif layout == "auto-facecam" and facecam_roi is None and overrides is None:
         config["facecam_detector"] = facecam_fingerprint(facecam_model)
+    if source_link is not None:
+        config["source_link"] = source_link
     job_id = "manual-" + artifact_key(config)[:24]
     output = output_root / job_id
     manifest = output / "manual_review.json"
@@ -130,6 +134,7 @@ def render_manual_preview(
                 captions_override=captions_override, layout_override=overrides,
                 shorts_style=layout == "shorts",
                 title=title, title_source=title_source, burn_hook=burn_hook, sound_cues=mix,
+                **({"source_link": source_link} if source_link is not None else {}),
             )
             report = {
                 **clip, "schema_version": SCHEMA, "job_id": job_id, "source": str(source), "source_id": source_id,
@@ -138,6 +143,8 @@ def render_manual_preview(
                 "review_manifest": str(manifest), "manual_review_required": True, "auto_publishing": False,
                 "parent_edit": parent_edit, "timing": {"total_seconds": round(perf_counter() - started, 3)},
             }
+            if source_link is not None:
+                report["source_link"] = source_link
             review_page(stage / "review.html", [report], "Chomp-Chomp clip review")
             write_json(stage / manifest.name, report)
             if output.exists():
@@ -198,4 +205,5 @@ def rerender(
         burn_hook=plan.get("burn_hook", False) if burn_hook is None else burn_hook,
         parent_edit=digest_file(edit_path), saved_framing=saved_framing,
         sound_cues_path=sound_cues_path, saved_sound_cues=plan.get("sound_cues"),
+        source_link=plan.get("source_link"),
     )

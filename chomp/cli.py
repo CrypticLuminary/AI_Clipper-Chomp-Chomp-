@@ -1,4 +1,4 @@
-"""Command line workflow for authorized local recordings."""
+"""Command line workflow for authorized recordings."""
 from __future__ import annotations
 
 import argparse
@@ -61,6 +61,11 @@ def _print(value: object) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    from .streambridge.cli import command as source_command, media_options, prepare_input
+    from .streambridge.source import BridgeError, looks_remote
+
+    if argv and argv[0] in {"source", "live", "youtube", "twitch"}:
+        return source_command(argv[0], argv[1:])
     if argv and argv[0] == "clip":
         from .director.clip import main as clip_main
 
@@ -82,11 +87,12 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in {"hardware", "evolution-feedback", "evolution-train"}:
         from .evolution_feedback import command
         return command(argv[0], argv[1:])
-    p = argparse.ArgumentParser(prog="chomp", description="Find and review highlights from authorized local VODs",
+    p = argparse.ArgumentParser(prog="chomp", description="Find and review highlights from authorized recordings",
                                 epilog="Use chomp clip for Director selection. Review commands: chomp rerender, "
                                        "chomp approve, chomp director, and chomp shots")
     p.add_argument("--version", action="version", version=__version__)
-    p.add_argument("--input", action="append", required=True, metavar="LOCAL_VIDEO", help="local VOD file; repeat for batch")
+    p.add_argument("--input", action="append", required=True, metavar="SOURCE", help="local recording or platform URL with authorized media")
+    media_options(p)
     p.add_argument("--output", type=Path, default=Path("outputs"))
     p.add_argument("--engine", choices=["heuristic", "evolution"], default="heuristic")
     p.add_argument("--hardware-profile", choices=["eco", "balanced", "gpu"], default="eco")
@@ -167,6 +173,10 @@ def main(argv: list[str] | None = None) -> int:
     if len(args.input) > 1 and (args.chat or args.transcript or args.speaker_turns or args.main_speaker_id or args.layout_plan):
         p.error("Transcript, chat, speaker and layout sidecars apply to one input at a time")
 
+    if len(args.input) > 1 and any((args.media_file, args.media_url, args.media_url_env,
+                                    args.twitch_download, args.acquired_job, args.portrait, args.sha256)):
+        p.error("Attached media applies to one source at a time")
+
     def parse_roi(value: str | None, name: str) -> tuple[int, int, int, int] | None:
         if value is None:
             return None
@@ -209,14 +219,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.speaker_turns or args.main_speaker_id or args.chat or args.semantic_model:
             p.error("Manual preview uses the requested interval without ranking or speaker attribution")
         try:
+            media, link = prepare_input(args.input[0], args)
             report = render_manual_preview(
-                Path(args.input[0]), args.output, start_s=args.start, end_s=args.end,
+                media, args.output, start_s=args.start, end_s=args.end,
                 transcribe=args.refine_captions or (args.transcribe and args.transcript is None), **shared,
                 title=args.title, burn_hook=args.burn_hook, sound_cues_path=args.sound_cues,
                 subject_plan_path=args.subject_plan, streamer_anchor=anchor,
+                **({"source_link": link.provenance()} if link else {}),
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
-            _print({"source": args.input[0], "error": str(exc)})
+            _print({"source": "URL input" if looks_remote(args.input[0]) else args.input[0], "error": str(exc),
+                    **({"source_error": exc.public()} if isinstance(exc, BridgeError) else {})})
             return 1
         _print(report)
         return 0
@@ -252,26 +265,33 @@ def main(argv: list[str] | None = None) -> int:
         p.error(str(exc))
     failures = 0
     for src in args.input:
+        safe_source = "URL input" if looks_remote(src) else src
         try:
+            media, link = prepare_input(src, args)
+            if link:
+                safe_source = link.source.canonical_url or (src if link.source.platform == "local" else link.source.source_id)
             result = process(
-                Path(src), args.output, chat_path=args.chat, chat_offset_ms=args.chat_offset_ms,
+                media, args.output, chat_path=args.chat, chat_offset_ms=args.chat_offset_ms,
                 reaction_lag_ms=args.chat_reaction_lag_ms, speaker_turns_path=args.speaker_turns,
                 main_speaker_id=args.main_speaker_id, transcribe=args.transcribe,
                 refine_captions=args.refine_captions, min_score=args.min_score, limit=args.max_clips, render=args.render,
                 proposals_per_hour=args.proposals_per_hour, editorial_provider=provider,
                 semantic_budget=args.semantic_budget, burn_hook=args.burn_hook, evolution=evolution,
                 evolution_provider=evolution_provider, **shared,
+                **({"source_link": link.provenance()} if link else {}),
             )
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
-            _print({"source": src, "error": str(exc)})
+            _print({"source": safe_source, "error": str(exc),
+                    **({"source_error": exc.public()} if isinstance(exc, BridgeError) else {})})
             failures += 1
             continue
         if result.get("engine") == "evolution" and result.get("analysis_status") == "partial":
             failures += 1
-        _print({"job_id": result["job_id"], "source": src, "candidates": result["candidate_count"],
+        _print({"job_id": result["job_id"], "source": safe_source, "candidates": result["candidate_count"],
                 "review_clips": result["selected_for_review"], "review_page": result["review_page"],
                 "candidate_ledger": result["candidate_ledger"], "reused_job": result.get("reused_job", False),
                 "review_queue": str(args.output.resolve() / result["job_id"] / "review_queue.json"),
+                **({"source_link": result["source_link"]} if "source_link" in result else {}),
                 **({"evidence": result["evolution_evidence"], "analysis_status": result["analysis_status"]}
                    if result.get("engine") == "evolution" else {})})
     return int(failures != 0)

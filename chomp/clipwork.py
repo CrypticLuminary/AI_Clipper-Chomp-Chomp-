@@ -98,7 +98,7 @@ def create_clip(
     captions_override: Path | None = None, layout_override: list[dict] | None = None,
     shorts_style: bool = False,
     title: str | None = None, title_source: str | None = None, burn_hook: bool = False,
-    sound_cues: tuple[SoundCue, ...] = (),
+    sound_cues: tuple[SoundCue, ...] = (), source_link: dict | None = None,
 ) -> dict:
     checked_span(start_ms, end_ms, duration_ms)
     if profile not in PROFILES:
@@ -158,6 +158,8 @@ def create_clip(
         "title": title, "title_source": title_source if title else None, "burn_hook": burn_hook,
         "human_review_required": True, "fit_facecam": framing.fit_facecam,
     }
+    if source_link is not None:
+        plan["source_link"] = source_link
     if framing.detection:
         plan["facecam_detection"] = framing.detection
     if framing.subject_tracking is not None:
