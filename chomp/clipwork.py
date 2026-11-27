@@ -124,6 +124,19 @@ def create_clip(
         if framing.segments and gameplay_roi is not None:
             segments = tuple(replace(s, gameplay_roi=gameplay_roi, gameplay_path=(), preserve_gameplay=True)
                              if s.layout != "letterbox" else s for s in segments)
+    if requirements and requirements.protected_hud_roi:
+        hx, hy, hw, hh = requirements.protected_hud_roi
+        protected = []
+        for segment in segments:
+            game = segment.gameplay_roi
+            if game:
+                x, y, w, h = game
+                left, top = min(x, hx), min(y, hy)
+                game = (left, top, max(x + w, hx + hw) - left, max(y + h, hy + hh) - top)
+            protected.append(replace(segment, gameplay_roi=game, gameplay_path=(),
+                                     preserve_gameplay=True, camera_slot="top"))
+        segments = tuple(protected)
+        warnings.append("Protected source region kept in the gameplay view. Check HUD readability.")
     has_gameplay_crop = any(s.gameplay_roi is not None for s in segments)
     if has_gameplay_crop:
         warnings.append("Confirm the selected gameplay region retains essential action and HUD elements")
@@ -180,13 +193,19 @@ def create_clip(
     loudness = None
     preview_hash = None
     measured_duration = None
+    encoder = "libx264"
     audio_warning = False
     if render:
         mp4 = work / mp4_name
-        render_preview(source, mp4, start_ms, end_ms, width, height,
+        rendered = render_preview(source, mp4, start_ms, end_ms, width, height,
                        captions_path=srt, audio_stream=audio_stream, segments=segments,
                        caption_position=caption_position, audio_profile=audio_profile, shorts=shorts_style,
-                       hook=title if burn_hook else None, sound_cues=sound_cues)
+                       hook=title if burn_hook else None, sound_cues=sound_cues,
+                       **({"prefer_nvenc": True} if requirements and requirements.hardware == "gpu" else {}))
+        if requirements and requirements.hardware == "gpu":
+            encoder = (rendered or {}).get("encoder", "libx264")
+            if encoder != "h264_nvenc":
+                warnings.append("NVIDIA encoding was unavailable. This clip used the CPU encoder.")
         if requirements:
             measured_duration = probe(mp4)["duration_ms"]
             lo, hi = requirements.bounds
@@ -207,7 +226,7 @@ def create_clip(
         "preview": str(published / mp4_name) if render else None,
         "edit_spec": str(published / edit_name),
         "captions_srt": str(published / srt_name) if srt else None,
-        **({"media_duration_ms": measured_duration, "width": width, "height": height} if requirements else {}),
+        **({"media_duration_ms": measured_duration, "width": width, "height": height, "encoder": encoder} if requirements else {}),
         "caption_cues": captions.count, "caption_timing": captions.timing, "audio_mean_dbfs": mean,
         "audio_warning": audio_warning, "loudness": loudness, "review_status": "pending",
         "layout_review_required": bool(framing.warnings or layout_override or has_gameplay_crop),

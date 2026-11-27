@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 from zipfile import ZIP_STORED, ZipFile
 
 from ..artifacts import artifact_key, artifact_lock, staged_file
-from ..clipcontrol import ClipControl, PRESETS
+from ..clipcontrol import ClipControl
 from ..director.evidence import extract_frame
 from ..media import probe
 from ..reframe import oriented_size
@@ -130,9 +130,12 @@ class StudioHandler(BaseHTTPRequestHandler):
         manager = self.server.manager
         store = manager.store
         if not mutate and path == "/api/session":
-            return self.data({"token": self.server.token, "presets": PRESETS})
+            return self.data({"token": self.server.token, "presets": store.presets()})
         if not mutate and path == "/api/jobs":
             return self.data({"jobs": [store.public(row) for row in store.list()][:100]})
+        if mutate and path == "/api/presets":
+            data = self.body()
+            return self.data({"presets": store.save_preset(data["name"], data["requirements"])}, 201)
         if mutate and path == "/api/requirements":
             return self.data(ClipControl.parse(self.body()).public())
         if mutate and path == "/api/source":
@@ -141,7 +144,9 @@ class StudioHandler(BaseHTTPRequestHandler):
             if source.platform == "local":
                 raise ValueError("Select a local file with the file picker")
             source, error = inspect(source)
-            return self.data({"source": source.public(), "metadata_error": error,
+            availability = ("creator_feed_required" if source.live_status == "live" else
+                            "creator_original_required") if source.platform in {"youtube", "twitch"} else "attached_media_possible"
+            return self.data({"source": source.public(), "metadata_error": error, "media_availability": availability,
                               "embed": embed(source, parent=self.headers["Host"].split(":")[0],
                                              origin="http://" + self.headers["Host"])})
         if mutate and path == "/api/uploads":

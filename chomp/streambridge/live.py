@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import re
@@ -14,7 +15,7 @@ from ..asr import LocalTranscriber
 from ..evolution import EvolutionConfig
 from ..clipcontrol import ClipControl, MAX_CLIPS
 from ..manual import render_manual_preview
-from ..media import check_audio_track, exec_checked, probe
+from ..media import check_audio_track, decode_audio_window, exec_checked, probe
 from ..pipeline import process
 from .acquire import Jobs, Limits, assert_permission, transfer, verify_local
 from .network import media_target, open_media
@@ -210,6 +211,8 @@ class RollingBuffer:
         self.clock = BroadcastClock(options)
         self.rows, self.ready = [], []
         self.pending = []
+        self.unresolved = []
+        self.session_segments = []
         self.errors = []
         self.count = self.bytes_retained = self.discontinuities = 0
         self.last_analysis = None
@@ -223,7 +226,7 @@ class RollingBuffer:
         if chunk.gap:
             self.clock.position(chunk, chunk.duration_ms)
             self.discontinuities += 1
-            self.pending = []
+            self.expire_pending("feed_discontinuity")
             self.trim()
             return
         path = self.chunk_dir / f"{chunk.sequence:014d}.ts"
@@ -256,30 +259,72 @@ class RollingBuffer:
         self.bytes_retained += size
         self.count += 1
         if clock["discontinuity"]:
-            self.pending = []
+            self.expire_pending("feed_discontinuity")
             self.discontinuities += 1
         if self.asr:
             try:
-                row["segments"], cached = self.asr.cached(self.folder / "cache", path, "sha256:" + digest,
-                                                      info["duration_ms"], self.options.audio_stream, words=True)
-                row["transcript_cache"] = cached.name
+                self.transcribe_chunk(row, path)
             except (OSError, RuntimeError, ValueError):
-                self.remember_error("asr_unavailable", chunk.sequence)
+                if self.asr.device == "cuda":
+                    self.remember_error("asr_cuda_fallback", chunk.sequence)
+                    self.asr = LocalTranscriber(self.options.asr_model, "cpu", quiet_gain=True)
+                    try:
+                        self.transcribe_chunk(row, path)
+                    except (OSError, RuntimeError, ValueError):
+                        self.remember_error("asr_unavailable", chunk.sequence)
+                else:
+                    self.remember_error("asr_unavailable", chunk.sequence)
         self.trim()
+
+    def transcribe_chunk(self, row, path):
+        previous = self.rows[-2] if len(self.rows) >= 2 else None
+        begin = row["start_ms"]
+        raw = b""
+        if previous and previous["epoch"] == row["epoch"] and previous["end_ms"] == begin:
+            length = previous["end_ms"] - previous["start_ms"]
+            overlap = min(4000, length)
+            raw = decode_audio_window(self.chunk_dir / previous["file"], length - overlap, length,
+                                      audio_stream=self.options.audio_stream)
+            begin -= overlap
+        raw += decode_audio_window(path, 0, row["end_ms"] - row["start_ms"], audio_stream=self.options.audio_stream)
+        fresh = self.asr.transcribe_pcm(raw, start_ms=begin, words=True)
+        stable = [t for t in self.session_segments if t["start_ms"] < begin or t["epoch"] != row["epoch"]]
+        for item in fresh:
+            if stable and stable[-1]["epoch"] == row["epoch"] and item["start_ms"] < stable[-1]["end_ms"]:
+                prior = stable[-1]
+                if item["end_ms"] <= prior["end_ms"] + 300 or len(item["text"]) < len(prior["text"]):
+                    continue
+                stable.pop()
+            stable.append({**item, "epoch": row["epoch"]})
+        self.session_segments = stable
+        replacement = [item for item in stable if item["epoch"] == row["epoch"] and item["end_ms"] > begin]
+        with (self.folder / "session-transcript.jsonl").open("a", encoding="utf-8") as out:
+            out.write(json.dumps({"sequence": row["sequence"], "replace_from_ms": begin,
+                                 "epoch": row["epoch"], "utterances": replacement}, ensure_ascii=True) + "\n")
+
+    def expire_pending(self, reason, candidates=None):
+        expired = self.pending if candidates is None else candidates
+        for item in expired:
+            self.unresolved.append({**item, "status": "unresolved", "lifecycle": "UNRESOLVED", "reason": reason})
+        if candidates is None:
+            self.pending = []
+        else:
+            identifiers = {item["candidate_id"] for item in candidates}
+            self.pending = [item for item in self.pending if item["candidate_id"] not in identifiers]
 
     def remember_error(self, code, sequence):
         self.errors = [*self.errors[-31:], {"code": code, "sequence": sequence}]
 
     def trim(self):
         oldest = self.clock.end_ms - self.options.retention_seconds * 1000
+        if self.pending:
+            oldest = min(oldest, min(item["start_ms"] for item in self.pending))
         while self.rows and (self.rows[0]["end_ms"] <= oldest or self.bytes_retained > self.options.max_buffer_bytes):
             row = self.rows.pop(0)
+            affected = [item for item in self.pending if item["start_ms"] < row["end_ms"]]
+            if affected:
+                self.expire_pending("rolling_storage_limit", affected)
             (self.chunk_dir / row["file"]).unlink(missing_ok=True)
-            # Per-chunk transcript data follows the media retention policy.
-            cached = self.folder / "cache" / "transcripts"
-            if row.get("transcript_cache") and not any(
-                    r.get("transcript_cache") == row["transcript_cache"] for r in self.rows):
-                (cached / row["transcript_cache"]).unlink(missing_ok=True)
             self.bytes_retained -= row["bytes"]
 
     def analyze(self, *, ended: bool):
@@ -289,8 +334,10 @@ class RollingBuffer:
         last = self.rows[-1]["end_ms"]
         if not ended and self.last_analysis is not None and last - self.last_analysis < max(4000, o.lookahead_seconds * 500):
             return
-        rows = [row for row in self.rows if row["epoch"] == self.clock.epoch and
-                row["end_ms"] > last - o.context_seconds * 1000]
+        window_start = last - o.context_seconds * 1000
+        for item in self.pending:
+            window_start = min(window_start, item["start_ms"])
+        rows = [row for row in self.rows if row["epoch"] == self.clock.epoch and row["end_ms"] > window_start]
         if not rows or last - rows[0]["start_ms"] < o.min_ms:
             return
         self.last_analysis = last
@@ -311,8 +358,17 @@ class RollingBuffer:
                 self._prune_inactive(work)
                 return
             control = replace(control, source_start_ms=lower, source_end_ms=upper)
-        write_json(transcript, {"segments": window_transcript(rows, start, duration)})
+        timeline = []
+        for item in self.session_segments:
+            if item["epoch"] != self.clock.epoch or not start <= item["start_ms"] < item["end_ms"] <= start + duration:
+                continue
+            translated = {**item, "start_ms": item["start_ms"] - start, "end_ms": item["end_ms"] - start}
+            translated["words"] = [{**word, "start_ms": word["start_ms"] - start, "end_ms": word["end_ms"] - start}
+                                   for word in item.get("words", [])]
+            timeline.append(translated)
+        write_json(transcript, {"segments": timeline})
         ready_candidates = []
+        visited = set()
         keep = False
         try:
             result = process(joined, work / "analysis", rights_ref=self.rights_ref, transcript_path=transcript,
@@ -334,13 +390,22 @@ class RollingBuffer:
                         max(0, min(right, x["end_ms"]) - max(left, x["start_ms"])) >= .5 * min(right - left, x["end_ms"] - x["start_ms"])
                         for x in self.ready):
                     continue
-                candidate = {"candidate_id": row["candidate_id"], "start_ms": left, "end_ms": right,
+                old = next((item for item in self.pending if item["epoch"] == self.clock.epoch and
+                            min(item["end_ms"], right) - max(item["start_ms"], left) >=
+                            .55 * min(right-left, item["end_ms"]-item["start_ms"])), None)
+                identifier = old["candidate_id"] if old else artifact_key(
+                    [self.source.source_id, self.clock.epoch, left, right, c.get("transcript_excerpt")])[:24]
+                visited.add(identifier)
+                candidate = {"candidate_id": identifier, "start_ms": left, "end_ms": right,
                              "epoch": self.clock.epoch, "clock_source": self.clock.source,
-                             "window_start_ms": start, "candidate_ledger": result["candidate_ledger"]}
+                             "window_start_ms": start, "candidate_ledger": result["candidate_ledger"],
+                             "ranking_method": c.get("ranking_method"), "rationale": c.get("rationale"),
+                             "description": c.get("transcript_excerpt")}
                 if not ended and right + o.lookahead_seconds * 1000 > last:
-                    ready_candidates.append({**candidate, "status": "pending_context"})
+                    ready_candidates.append({**candidate, "status": "pending_context", "lifecycle": "WAITING_FOR_CONTEXT"})
                     continue
                 candidate["status"] = "review_ready"
+                candidate["lifecycle"] = "VERIFIED" if c.get("ranking_method") == "evolution_director_verified" else "READY"
                 if o.render:
                     rendered = render_manual_preview(joined, self.folder / "review", start_s=c["start_ms"] / 1000,
                         end_s=c["end_ms"] / 1000, rights_ref=self.rights_ref, audio_stream=self.options.audio_stream,
@@ -352,9 +417,18 @@ class RollingBuffer:
                     keep = True
                     candidate["review_page"] = rendered["review_page"]
                     candidate["preview"] = rendered["preview"]
+                    candidate["lifecycle"] = "RENDERED"
                 self.ready.append(candidate)
                 if len(self.ready) >= o.max_clips:
                     break
+            for item in self.pending:
+                if item["candidate_id"] in visited:
+                    continue
+                if ended or item["end_ms"] + o.lookahead_seconds * 1000 <= last:
+                    self.unresolved.append({**item, "status": "unresolved", "lifecycle": "UNRESOLVED",
+                                            "reason": "not_selected_after_context"})
+                else:
+                    ready_candidates.append(item)
             self.pending = ready_candidates
         finally:
             if not keep:
@@ -368,7 +442,7 @@ class RollingBuffer:
         root = self.folder / "analyses"
         if root.resolve() != root:
             raise BridgeError("invalid_job", "Live analysis storage escapes its job directory.")
-        active = {Path(item["candidate_ledger"]).parents[2] for item in self.ready}
+        active = {Path(item["candidate_ledger"]).parents[2] for item in [*self.ready, *self.pending]}
         for entry in root.iterdir():
             if entry != current and entry not in active and entry.is_dir() and entry.resolve() == entry \
                     and re.fullmatch(r"[0-9a-f]{24}", entry.name):
@@ -458,7 +532,8 @@ def run_live(value: str, root: Path, *, rights_ref: str, confirmed: bool, feed_u
                 "ingested_chunks": buffer.count, "retained_bytes": buffer.bytes_retained,
                 "discontinuities": buffer.discontinuities, "errors": buffer.errors,
                 "chunks": [{k: v for k, v in row.items() if k not in {"segments", "geometry", "transcript_cache"}}
-                           for row in buffer.rows], "pending": buffer.pending, "ready": buffer.ready}
+                           for row in buffer.rows], "pending": buffer.pending, "ready": buffer.ready,
+                "unresolved": buffer.unresolved, "session_utterances": len(buffer.session_segments)}
 
     try:
         source, metadata_error = inspect(source, youtube=youtube, twitch=twitch)

@@ -36,6 +36,7 @@ class ClipControl:
     layout: str = "shorts"
     facecam_roi: tuple[int, int, int, int] | None = None
     gameplay_roi: tuple[int, int, int, int] | None = None
+    protected_hud_roi: tuple[int, int, int, int] | None = None
     hardware: str = "eco"
     instructions: str = ""
     preferred_topics: tuple[str, ...] = ()
@@ -78,7 +79,7 @@ class ClipControl:
             if not isinstance(topics, (tuple, list)) or len(topics) > 20 or any(
                     not isinstance(t, str) or not 0 < len(t) <= 150 or not t.strip() for t in topics):
                 raise ValueError("Supply at most 20 nonempty topics with up to 150 characters each")
-        for rect in (self.facecam_roi, self.gameplay_roi):
+        for rect in (self.facecam_roi, self.gameplay_roi, self.protected_hud_roi):
             if rect is not None and (not isinstance(rect, (list, tuple)) or len(rect) != 4 or
                                      any(type(x) is not int or x < 0 or x > 16384 for x in rect) or not all(rect[2:])):
                 raise ValueError("Regions require integer x, y, width and height in source pixels")

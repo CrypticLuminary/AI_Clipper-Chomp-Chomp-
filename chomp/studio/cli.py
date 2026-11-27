@@ -34,7 +34,9 @@ def command(group, argv):
     start.add_argument("--acknowledge-permission", action="store_true")
     start.add_argument("--media-url-env")
     start.add_argument("--feed-url-env")
-    start.add_argument("--live", action="store_true")
+    mode = start.add_mutually_exclusive_group()
+    mode.add_argument("--live", action="store_true")
+    mode.add_argument("--monitor", action="store_true")
     start.add_argument("--spool", type=Path)
     start.add_argument("--live-seconds", type=int, default=300)
     start.add_argument("--twitch-download", action="store_true")
@@ -47,6 +49,10 @@ def command(group, argv):
     check = sub.add_parser("validate")
     check.add_argument("requirements", type=Path)
     sub.add_parser("list")
+    sub.add_parser("preset-list")
+    preset = sub.add_parser("preset-save")
+    preset.add_argument("name")
+    preset.add_argument("requirements", type=Path)
     for action in ("status", "cancel", "retry", "clips", "download", "zip", "revise", "feedback"):
         p = sub.add_parser(action)
         p.add_argument("job_id")
@@ -58,7 +64,7 @@ def command(group, argv):
             p.add_argument("--start-ms", type=int, required=True)
             p.add_argument("--end-ms", type=int, required=True)
             p.add_argument("--layout")
-            for which in ("facecam-roi", "gameplay-roi"):
+            for which in ("facecam-roi", "gameplay-roi", "protected-hud-roi"):
                 p.add_argument("--" + which, type=int, nargs=4, metavar=("X", "Y", "W", "H"))
         if action == "feedback":
             p.add_argument("--decision", required=True, choices=("approve", "reject", "uncertain"))
@@ -79,7 +85,8 @@ def command(group, argv):
                       "requirements": read(args.requirements) if args.requirements else {}, "rights_ref": args.rights_ref,
                       "confirmed": args.acknowledge_permission, "media_url": url(args.media_url_env),
                       "feed_url": url(args.feed_url_env), "live_seconds": args.live_seconds,
-                      "kind": "live" if args.live or args.spool else "recording", "transcribe": args.transcribe,
+                      "kind": "monitor" if args.monitor else "live" if args.live or args.spool else "recording",
+                      "transcribe": args.transcribe,
                       "twitch_download": args.twitch_download, "provider_model": args.provider_model,
                       "provider_confirmed": args.confirm_provider, "asr_model": args.asr_model,
                       "asr_device": args.asr_device, "timeout": args.timeout}
@@ -88,9 +95,14 @@ def command(group, argv):
             job = manager.retry(args.job_id)
         elif args.action == "revise":
             job = manager.revise(args.job_id, args.clip, start_ms=args.start_ms, end_ms=args.end_ms,
-                                 layout=args.layout, facecam_roi=args.facecam_roi, gameplay_roi=args.gameplay_roi)
+                                 layout=args.layout, facecam_roi=args.facecam_roi, gameplay_roi=args.gameplay_roi,
+                                 protected_hud_roi=args.protected_hud_roi)
         elif args.action == "validate":
             response = ClipControl.parse(read(args.requirements)).public()
+        elif args.action == "preset-list":
+            response = {"presets": store.presets()}
+        elif args.action == "preset-save":
+            response = {"presets": store.save_preset(args.name, read(args.requirements))}
         elif args.action == "list":
             response = {"jobs": [store.public(row) for row in store.list()]}
         elif args.action == "status":

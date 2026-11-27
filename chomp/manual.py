@@ -1,7 +1,7 @@
 """Exact-range previews and rerendering from edited clip plans."""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import math
 from pathlib import Path
@@ -164,7 +164,7 @@ def rerender(
     profile: str | None = None, caption_position: str | None = None, audio_profile: str | None = None,
     layout_plan: Path | None = None, captions_override: Path | None = None,
     title: str | None = None, burn_hook: bool | None = None,
-    sound_cues_path: Path | None = None, facecam_roi=None, gameplay_roi=None, layout: str | None = None,
+    sound_cues_path: Path | None = None, facecam_roi=None, gameplay_roi=None, layout: str | None = None, protected_hud_roi=None,
 ) -> dict:
     plan = json.loads(edit_path.read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or plan.get("schema_version") != SCHEMA:
@@ -193,12 +193,21 @@ def rerender(
     segments = plan["segments"]
     if layout_plan is None and isinstance(segments, list) and len(segments) == 1 and not segments[0].get("gameplay_path"):
         segments = [{**segments[0], "start_ms": round(start * 1000), "end_ms": round(end * 1000)}]
+    if not same_bounds and len(segments) > 1 and layout_plan is None and not layout:
+        # Existing temporal geometry belongs to the old cut. Re-plan on the revised span.
+        layout = "shorts" if plan.get("shorts_style") else "auto"
     saved_framing = None
     if layout_plan is None and same_bounds and not (layout or facecam_roi or gameplay_roi):
         roi = plan.get("facecam_roi_px")
         saved_framing = FramingPlan(plan["layout"], tuple(roi) if roi else None,
                                     plan.get("facecam_detection"), warnings=tuple(plan.get("framing_warnings", ())),
                                     subject_tracking=plan.get("subject_tracking"))
+    requirements = ClipControl.parse(plan["requirements"]) if plan.get("requirements") else None
+    if requirements and (facecam_roi or gameplay_roi or protected_hud_roi or layout in {"fit", "facecam-gameplay", "gameplay-only", "shorts"}):
+        requirements = replace(requirements, layout=layout or requirements.layout,
+                               facecam_roi=facecam_roi or requirements.facecam_roi,
+                               gameplay_roi=gameplay_roi or requirements.gameplay_roi,
+                               protected_hud_roi=protected_hud_roi or requirements.protected_hud_roi)
     return render_manual_preview(
         Path(plan["source"]), output_root, rights_ref=plan["rights_ref"], start_s=start, end_s=end,
         expected_source_id=plan["source_id"], transcript_path=transcript, audio_stream=plan["audio_stream"],
@@ -214,5 +223,5 @@ def rerender(
         parent_edit=digest_file(edit_path), saved_framing=saved_framing,
         sound_cues_path=sound_cues_path, saved_sound_cues=plan.get("sound_cues"),
         source_link=plan.get("source_link"),
-        requirements=ClipControl.parse(plan["requirements"]) if plan.get("requirements") else None,
+        requirements=requirements,
     )

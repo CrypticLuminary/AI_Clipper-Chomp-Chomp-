@@ -85,6 +85,8 @@
                 <div><label for="audio-track">Audio track index</label><input id="audio-track" type="number" min="0" max="63" value="0"></div>
                 <div><label for="reasoning-calls">Reasoning call limit</label><input id="reasoning-calls" type="number" min="2" max="120" placeholder="Auto"></div>
               </div>
+              <label for="preset-name">Save these requirements</label>
+              <div class="inline"><input id="preset-name" maxlength="40" placeholder="Preset name"><button id="save-preset" type="button" class="secondary">Save preset</button></div>
               <label for="provider-model">Director model</label><input id="provider-model" placeholder="Optional installed Codex provider">
               <label class="check"><input id="provider-confirmed" type="checkbox"> Allow the named provider to inspect bounded source evidence.</label>
             </details>
@@ -115,7 +117,7 @@
       <h2>Trim and reframe</h2><p>Times use the recording clock.</p>
       <div class="grid-two"><div><label for="edit-start">Source start seconds</label><input id="edit-start" type="number" min="0" step=".001" required></div>
         <div><label for="edit-end">Source end seconds</label><input id="edit-end" type="number" min="0" step=".001" required></div></div>
-      <div class="inline"><button id="load-frame" type="button" class="secondary">Load source frame</button><select id="region-type" aria-label="Region type"><option value="facecam_roi">Streamer</option><option value="gameplay_roi">Gameplay</option></select></div>
+      <div class="inline"><button id="load-frame" type="button" class="secondary">Load source frame</button><select id="region-type" aria-label="Region type"><option value="facecam_roi">Streamer</option><option value="gameplay_roi">Gameplay</option><option value="protected_hud_roi">Protected HUD</option></select></div>
       <canvas id="frame-canvas" hidden aria-label="Source frame for region selection"></canvas>
       <p id="region-note">Drag on the frame to mark a region.</p>
       <p id="edit-error" role="status"></p>

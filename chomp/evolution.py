@@ -12,12 +12,12 @@ from .artifacts import artifact_key
 from .evolution_context import Proposal, close, investigate, needs_setup, repeated_story
 from .evolution_memory import Memory, fused_score, reciprocal_ranks, terms
 from .evolution_perception import visual_frames, visual_motion, yamnet
-from .evolution_reasoning import InvestigationBudget, Reasoner, evidence_view, provider_investigation
+from .evolution_reasoning import InvestigationBudget, REPAIRS, Reasoner, evidence_view, provider_investigation
 from .models import Candidate
 from .ranking import overlap_ratio
 from .research_interfaces import evidence_item
 
-VERSION = "evolution/5"
+VERSION = "evolution/6"
 PROFILES = {"eco": (8, 2500, 2800, 2800), "balanced": (16, 1250, 5600, 5600),
             "gpu": (24, 750, 9000, 9000)}
 LANES = ("dialogue", "acoustic", "visual", "chat", "exploration")
@@ -322,9 +322,10 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
     proposals, units = segment_and_discover(memory, identity, enabled,
         min(240, max(minimum_proposals, ceil(duration * proposals_per_hour / 3_600_000))), config.max_ms, scope)
     if provider:
-        proposals = diversify(proposals, duration, min(len(proposals), max(1, config.reasoning_calls // 2)))
+        proposals = diversify(proposals, duration, min(len(proposals), max(1, config.reasoning_calls * 2 // 5)))
     timings["discovery_seconds"] = round(perf_counter() - started, 3)
-    reasoner = Reasoner(provider, cache, config.reasoning_calls, config.reasoning_seconds) if provider and limit else None
+    reasoner = Reasoner(provider, cache, config.reasoning_calls, config.reasoning_seconds,
+                        balanced=requirements is not None) if provider and limit else None
     interest = None
     if config.model:
         from .evolution_feedback import load_model
@@ -332,7 +333,8 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
     records = []
     started = perf_counter()
     for index, proposal in enumerate(proposals):
-        tick("investigating", candidates=len(proposals), investigated=index)
+        if index % 4 == 0 or reasoner:
+            tick("investigating", candidates=len(proposals), investigated=index)
         candidate_id = artifact_key([VERSION, source_id, proposal.lane, proposal.core_ids, proposal.start_ms, proposal.end_ms])[:24]
         analysis = investigate(memory, proposal, "memory" not in config.disabled, "hybrid" not in config.disabled)
         decision = _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, config, identity,
@@ -361,7 +363,8 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
               "observations": list(memory.rows.values()), "semantic_unit_count": len(units),
               "retrieval_history": memory.history, "timing": timings,
               "reasoning": {"attempts": reasoner.attempts, "cache_hits": reasoner.cache_hits, "errors": reasoner.errors,
-                            "provider": reasoner.fingerprint, "reported_usage": dict(reasoner.usage)} if reasoner else {"state": "local_review"},
+                            "provider": reasoner.fingerprint, "reported_usage": dict(reasoner.usage),
+                            "phase_attempts": dict(reasoner.phases), "allocation": reasoner.allocation} if reasoner else {"state": "local_review"},
               "interest_model": interest["model_id"] if interest else None}
     return records, [candidate for candidate, _ in selected], report
 
@@ -378,7 +381,7 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
     note = "Local evidence needs editorial review"
     method = "evolution_local_review"
     boundary = model_data = final = None
-    alternatives = []
+    alternatives, verification_rounds = [], []
     frames = []
     groups = analysis["viewer_required_groups"]
     features = [proposal.strength, min(len(terms(dialogue)) / 60, 1),
@@ -388,6 +391,10 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
         indices = [memory.utterance_indices[row["id"]] for row in core if row["modality"] == "utterance"]
         if indices:
             features.extend([1., *memory.vectors[indices].mean(axis=0).round(6).tolist()])
+    if requirements and dialogue:
+        words = set(terms(dialogue))
+        matches = sum(bool(words.intersection(terms(topic))) for topic in requirements.preferred_topics)
+        score = min(100., score + min(9, matches * 3))
     if interest:
         from .evolution_feedback import interest_score
         score = round((score + 100 * interest_score(interest, features)) / 2, 2)
@@ -402,10 +409,14 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
                 memory.rows.update({row["id"]: row for row, _ in frames})
             model_data = provider_investigation(reasoner, memory, proposal, candidate_id, analysis, frames,
                                                 hybrid="hybrid" not in config.disabled,
-                                                allow_search="memory" not in config.disabled, duration=duration)
+                                                allow_search="memory" not in config.disabled, duration=duration,
+                                                preferences=({"instructions": requirements.instructions,
+                                                    "preferred_topics": requirements.preferred_topics,
+                                                    "excluded_topics": requirements.excluded_topics}
+                                                    if requirements else None))
             answer = model_data["answer"]
             note = answer["viewer_value"] or answer["stop_reason"]
-            state = {"select": "verify", "reject": "rejected", "unresolved": "unresolved"}[answer["action"]]
+            state = {"select": "verify", "update_interpretation": "verify", "reject": "rejected"}.get(answer["action"], "unresolved")
             if answer["critical_issues"] or answer["uncertainty"] == "high":
                 if state == "verify":
                     state = "unresolved"
@@ -435,29 +446,55 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
             state, note = "unresolved", "No contiguous interval covers the core and required viewer context"
     if state == "verify":
         try:
-            in_cut = [r for r in core if boundary.start_ms <= r["start_ms"] and r["end_ms"] <= boundary.end_ms]
-            in_cut += memory.around(boundary.start_ms, boundary.end_ms)
-            cut_frames = [(r, pixels) for r, pixels in frames if boundary.start_ms <= r["start_ms"] < boundary.end_ms]
-            in_cut += [r for r, _ in cut_frames]
             extra = [*model_data["additional_ids"], *analysis["interpretation_only_ids"],
                      *model_data["answer"]["interpretation_ids"], *model_data["answer"]["supporting_ids"]]
-            in_range = {r["id"]: r for r in in_cut}
-            payload = {"candidate_id": candidate_id, "candidate_core_ids": list(proposal.core_ids),
-                       "interval_ms": [boundary.start_ms, boundary.end_ms], "lane": proposal.lane,
-                       "ordered_image_ids": [r["id"] for r, _ in cut_frames],
-                       "interpretation_only_ids": [item for item in dict.fromkeys(extra) if item not in in_range],
-                       "investigation": model_data["answer"],
-                       "evidence": evidence_view([*in_range.values(), *memory.hydrate(dict.fromkeys(
-                           item for item in extra if item not in in_range))])}
-            final = reasoner.call("final", payload, [pixels for _, pixels in cut_frames])
-            citations = set(final["supporting_ids"])
-            if final["action"] == "select":
-                if not citations <= in_range.keys():
-                    raise ValueError("Final selection cites evidence outside the extraction")
-                if not citations.intersection(proposal.core_ids) and proposal.lane != "visual":
-                    raise ValueError("Final selection does not cite the interesting core")
-                if proposal.lane == "visual" and len(citations & set(payload["ordered_image_ids"])) < 2:
-                    raise ValueError("Visual selection needs at least two in-range source frames")
+
+            def verify(current, phase):
+                cut_start, cut_end = current.start_ms, current.end_ms
+                core_in = [row for row in core if cut_start <= row["start_ms"] < row["end_ms"] <= cut_end]
+                cut_frames = [(r, pixels) for r, pixels in frames if cut_start <= r["start_ms"] < cut_end]
+                in_range = {r["id"]: r for r in [*core_in, *memory.around(cut_start, cut_end),
+                                                 *(row for row, _ in cut_frames)]}
+                adjacent = [r["id"] for r in memory.around(cut_start, cut_end, margin=8000)
+                            if r["id"] not in in_range] if requirements else []
+                context = [item for item in dict.fromkeys([*extra, *adjacent]) if item not in in_range]
+                payload = {"candidate_id": candidate_id, "candidate_core_ids": list(proposal.core_ids),
+                           "interval_ms": [cut_start, cut_end], "lane": proposal.lane,
+                           "ordered_image_ids": [r["id"] for r, _ in cut_frames],
+                           "interpretation_only_ids": [item for item in context if item not in adjacent],
+                           "adjacent_ids": adjacent, "investigation": model_data["answer"],
+                           "evidence": evidence_view([*in_range.values(), *memory.hydrate(context)])}
+                answer = reasoner.call(phase, payload, [pixels for _, pixels in cut_frames])
+                verification_rounds.append({"phase": phase, "interval_ms": [cut_start, cut_end], "answer": answer})
+                citations = set(answer["supporting_ids"])
+                if answer["action"] == "select":
+                    if not citations <= in_range.keys():
+                        raise ValueError("Final selection cites evidence outside the extraction")
+                    if not citations.intersection(proposal.core_ids) and proposal.lane != "visual":
+                        raise ValueError("Final selection does not cite the interesting core")
+                    if proposal.lane == "visual" and len(citations & set(payload["ordered_image_ids"])) < 2:
+                        raise ValueError("Visual selection needs at least two in-range source frames")
+                return answer
+
+            final = verify(boundary, "verify" if requirements else "final")
+            if final["action"] in REPAIRS:
+                action = final["action"]
+                row = memory.rows[final["repair_evidence_id"]]
+                start, end = boundary.start_ms, boundary.end_ms
+                new_start, new_end = (row["start_ms"], end) if action.endswith("_start") else (start, row["end_ms"])
+                if not {"expand_start": new_start < start, "expand_end": new_end > end,
+                        "contract_start": new_start > start, "contract_end": new_end < end}[action]:
+                    raise ValueError("Boundary repair did not move the requested edge in the requested direction")
+                repaired, repair_options = close(memory, proposal, groups, duration=duration,
+                    minimum=config.min_ms, maximum=config.max_ms, audio=audio, hop=audio_hop,
+                    snap=False, preferred=preferred, bounds=bounds, exact=(new_start, new_end))
+                alternatives.extend(repair_options)
+                if repaired is None:
+                    raise ValueError("The boundary repair would violate duration or required evidence")
+                boundary = repaired
+                final = verify(boundary, "verify_repair")
+                if final["action"] in REPAIRS:
+                    raise ValueError("The bounded repair has already been attempted")
             state = {"select": "eligible", "reject": "rejected", "unresolved": "unresolved"}[final["action"]]
             score, note, method = final["score"], final["rationale"], "evolution_director_verified"
         except (InvestigationBudget, AttributeError, OSError, TypeError, KeyError, ValueError, RuntimeError) as exc:
@@ -480,5 +517,5 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
     row = {"candidate_id": candidate_id, "proposal": asdict(proposal), "candidate": candidate.to_dict(),
            "boundary": asdict(boundary) if boundary else None, "boundary_alternatives": alternatives,
            "decision": state, "reason_detail": note, "investigation": analysis, "provider_investigation": model_data,
-           "judgment": final, "feature_vector": features}
+           "judgment": final, "verification_rounds": verification_rounds, "feature_vector": features}
     return candidate, row

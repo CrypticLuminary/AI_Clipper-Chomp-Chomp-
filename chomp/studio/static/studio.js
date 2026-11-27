@@ -5,7 +5,7 @@ const input = id => by(id).value.trim();
 const number = (id, fallback = null) => input(id) === "" ? fallback : Number(input(id));
 const ms = id => number(id) === null ? null : Math.round(1000 * number(id));
 const terminal = new Set(["completed", "partial", "failed", "cancelled"]);
-const state = { token: "", presets: {}, job: null, rendered: null, edit: null, upload: new Map() };
+const state = { token: "", presets: {}, job: null, rendered: null, edit: null, upload: new Map(), inspected: null };
 const names = {resolving_source:"Resolving source", acquiring_media:"Acquiring media", processing_source:"Checking source",
   reading_transcript:"Reading transcript", optimizing_boundaries:"Optimizing boundaries", preparing_review:"Preparing review"};
 const pretty = value => names[value] || String(value || "").replaceAll("_", " ").replace(/^\w/, c => c.toUpperCase());
@@ -62,13 +62,16 @@ function link(text, url) {
 }
 
 async function inspectSource() {
-  if (!input("source-url")) return announce("Enter a Twitch or YouTube URL.", true);
+  const url = input("source-url");
+  if (!url) return announce("Enter a Twitch or YouTube URL.", true);
   const area = by("source-info");
   area.hidden = false;
   area.replaceChildren(el("p", "Resolving source…"));
   try {
-    const result = await post("/api/source", {source:input("source-url")});
+    const result = await post("/api/source", {source:url});
+    if (url !== input("source-url")) return;
     const s = result.source;
+    state.inspected = {url:input("source-url"), live:s.live_status === "live"};
     const summary = el("div", undefined, "source-summary");
     if (s.thumbnail) {
       const img = el("img");
@@ -81,7 +84,24 @@ async function inspectSource() {
     meta.append(el("p", [s.channel?.title || s.channel?.login, pretty(s.live_status),
       s.duration_ms ? sec(s.duration_ms) + " s" : null].filter(Boolean).join(" · ")));
     summary.append(meta);
-    area.replaceChildren(summary, el("p", "Editing media: attach a creator original or feed."));
+    const live = s.live_status === "live";
+    if (live && !by("video-file").files.length) setMode("live");
+    if (s.live_status === "completed" && !input("feed-url")) setMode("recording");
+    area.replaceChildren(summary, el("p", live ? "Live broadcast. Attach a creator HLS feed to capture clips." :
+      "Attach a creator original to render clips. The share link provides source information and platform playback."));
+    const actions = el("div", undefined, "inline");
+    if (s.canonical_url) {
+      const watch = link("Watch on " + (s.platform === "youtube" ? "YouTube" : "Twitch"), s.canonical_url);
+      watch.target = "_blank";
+      watch.rel = "noopener noreferrer";
+      actions.append(watch);
+    }
+    if (live) actions.append(button("Monitor live status", async () => {
+      const result = await post("/api/jobs", {kind:"monitor", source:s.canonical_url, live_seconds:number("live-seconds",300),
+        confirmed:true, rights_ref:"Public platform metadata monitoring only"});
+      await selectJob(result.id);
+    }));
+    area.append(actions);
     if (result.metadata_error) area.append(el("p", result.metadata_error.message));
     if (result.embed) {
       const show = button("Open source player", () => {
@@ -90,9 +110,12 @@ async function inspectSource() {
         frame.title = "Original platform player";
         frame.allow = "fullscreen; encrypted-media; picture-in-picture";
         frame.allowFullscreen = true;
-        show.replaceWith(frame);
+        show.hidden = true;
+        area.append(frame);
+        if (s.platform === "youtube") area.append(el("p",
+          "If the embedded player says the video is unavailable, use the Watch on YouTube link above."));
       });
-      area.append(show);
+      actions.prepend(show);
     }
   } catch (error) { area.replaceChildren(el("p", error.message, "error")); }
 }
@@ -112,6 +135,15 @@ async function submit(event) {
   start.disabled = true;
   const kind = document.querySelector("input[name=source-mode]:checked").value;
   try {
+    if (kind === "live" && !input("feed-url")) {
+      throw new Error("Add a creator-authorized HLS playlist. Use Monitor live status for a platform URL without a feed.");
+    }
+    if (kind === "recording" && input("source-url") && !by("video-file").files.length &&
+        !input("media-url") && !by("twitch-download").checked) {
+      const host = new URL(input("source-url")).hostname.toLowerCase();
+      if (/^(?:(?:www|m)\.)?(?:youtube\.com|youtu\.be|twitch\.tv)$/.test(host) || host === "clips.twitch.tv")
+        throw new Error("Attach the creator's original recording or an authorized HTTPS file to render this source.");
+    }
     const control = requirements();
     await post("/api/requirements", control);
     announce(kind === "recording" ? "Preparing the recording…" : "Starting live capture…");
@@ -161,6 +193,8 @@ async function refresh() {
     details.candidates !== undefined ? details.candidates + " candidates" : null,
     details.investigated !== undefined ? details.investigated + " investigated" : null,
     details.ingested_chunks !== undefined ? details.ingested_chunks + " chunks" : null,
+    details.live_status ? "Stream " + pretty(details.live_status).toLowerCase() : null,
+    data.kind === "monitor" ? "Metadata only" : null,
     details.bytes_received ? (details.bytes_received / (1024*1024)).toFixed(1) + " MiB received" : null,
     (details.produced ?? data.produced) !== undefined ? (details.produced ?? data.produced) + " clips produced" : null,
   ].filter(Boolean).join(" · ");
@@ -171,7 +205,9 @@ async function refresh() {
   by("events").replaceChildren(...data.events.slice(-8).map(event => el("li", pretty(event.stage))));
   if (terminal.has(data.status) && state.rendered !== id) {
     state.rendered = id;
-    if (data.status === "completed" || data.status === "partial") await renderClips(id);
+    if (data.kind === "monitor" && data.status === "completed")
+      announce(data.monitor_summary, false, "result-note");
+    else if (data.status === "completed" || data.status === "partial") await renderClips(id);
     else announce(data.error?.message || "This job has no completed exports.", Boolean(data.error), "result-note");
     await jobs();
   }
@@ -275,7 +311,7 @@ function paint(current) {
     [input("region-type")]: [edit.start[0],edit.start[1],current[0]-edit.start[0],current[1]-edit.start[1]]
   } : {};
   for (const [name,bounds] of Object.entries({...edit.rects,...rect})) {
-    ctx.strokeStyle = name === "facecam_roi" ? "#d9fa73" : "#a5b9ff";
+    ctx.strokeStyle = name === "facecam_roi" ? "#d9fa73" : name === "protected_hud_roi" ? "#ffbc84" : "#a5b9ff";
     ctx.lineWidth = 3;
     ctx.strokeRect(bounds[0]*canvas.width,bounds[1]*canvas.height,bounds[2]*canvas.width,bounds[3]*canvas.height);
   }
@@ -293,7 +329,7 @@ canvas.addEventListener("pointerup", event => {
   const [x,y] = point(event), [ox,oy] = edit.start;
   if (Math.abs(x-ox) > .02 && Math.abs(y-oy) > .02) {
     edit.rects[input("region-type")] = [Math.min(x,ox),Math.min(y,oy),Math.abs(x-ox),Math.abs(y-oy)];
-    announce(Object.keys(edit.rects).map(key => key === "facecam_roi" ? "Streamer region" : "Gameplay region").join(" · ") + " selected.",
+    announce(Object.keys(edit.rects).map(key => key === "facecam_roi" ? "Streamer region" : key === "protected_hud_roi" ? "Protected HUD" : "Gameplay region").join(" · ") + " selected.",
       false, "region-note");
   }
   edit.start = null;
@@ -331,17 +367,44 @@ by("edit-form").addEventListener("submit", async event => {
 by("job-form").addEventListener("submit", submit);
 by("inspect-button").addEventListener("click", inspectSource);
 by("video-file").addEventListener("change", () => { by("video-name").textContent = by("video-file").files[0]?.name || "MP4, MOV, MKV, WebM or TS"; });
-document.querySelectorAll("input[name=source-mode]").forEach(node => node.addEventListener("change", () => {
-  by("live-fields").hidden = node.value !== "live";
-  by("recording-fields").hidden = node.value === "live";
-  by("start-job").textContent = node.value === "live" ? "Start capture" : "Start processing";
-}));
+function setMode(mode) {
+  document.querySelector("input[name=source-mode][value=" + mode + "]").checked = true;
+  by("live-fields").hidden = mode !== "live";
+  by("recording-fields").hidden = mode === "live";
+  by("start-job").textContent = mode === "live" ? "Start capture" : "Start processing";
+}
+document.querySelectorAll("input[name=source-mode]").forEach(node => node.addEventListener("change", () => setMode(node.value)));
 by("preset").addEventListener("change", () => {
   const p = state.presets[input("preset")];
   if (!p) return;
   const fields = {aspect:p.aspect,resolution:p.resolution,layout:p.layout || "shorts",
-    "duration-min":p.min_ms/1000,"duration-max":p.max_ms/1000,"duration-pref":p.preferred_ms/1000};
-  for (const [id,value] of Object.entries(fields)) by(id).value = value;
+    "clip-count":p.clips,"count-mode":p.mode,"campaign-min":p.campaign_min_ms/1000,"campaign-max":p.campaign_max_ms/1000,
+    "source-start":p.source_start_ms == null ? "" : p.source_start_ms/1000,
+    "source-end":p.source_end_ms == null ? "" : p.source_end_ms/1000,
+    instructions:p.instructions,hardware:p.hardware,audio:p.audio_profile,"audio-track":p.audio_stream,
+    "reasoning-calls":p.reasoning_calls ?? "",
+    "duration-min":p.min_ms/1000,"duration-max":p.max_ms/1000,"duration-pref":p.preferred_ms == null ? "" : p.preferred_ms/1000};
+  for (const [id,value] of Object.entries(fields)) if (value !== undefined && !Number.isNaN(value)) by(id).value = value;
+  if (p.captions !== undefined) by("captions").checked = p.captions;
+});
+function loadPresets(presets) {
+  state.presets = presets;
+  const select = by("preset");
+  select.replaceChildren(el("option", "Presets"));
+  select.firstChild.value = "";
+  for (const name of Object.keys(presets)) {
+    const option = el("option", name[0].toUpperCase() + name.slice(1));
+    option.value = name;
+    select.append(option);
+  }
+}
+by("save-preset").addEventListener("click", async () => {
+  try {
+    const data = await post("/api/presets", {name:input("preset-name"), requirements:requirements()});
+    loadPresets(data.presets);
+    by("preset").value = input("preset-name");
+    announce("Preset saved.");
+  } catch (error) { announce(error.message, true); }
 });
 by("refresh-jobs").addEventListener("click", () => jobs().catch(error => announce(error.message,true)));
 by("cancel-job").addEventListener("click", async () => {
@@ -355,7 +418,7 @@ by("load-frame").addEventListener("click", loadFrame);
 by("close-edit").addEventListener("click", () => by("edit-dialog").close());
 request("/api/session").then(data => {
   state.token = data.token;
-  state.presets = data.presets;
+  loadPresets(data.presets);
   return jobs();
 }).catch(error => announce(error.message,true));
 setInterval(() => { if (state.job && state.rendered !== state.job) refresh().catch(error => announce(error.message,true)); }, 900);

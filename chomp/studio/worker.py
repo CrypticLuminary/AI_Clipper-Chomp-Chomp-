@@ -13,7 +13,7 @@ from ..evolution import EvolutionConfig
 from ..manual import rerender
 from ..pipeline import process
 from ..streambridge.acquire import acquire, verify_local
-from ..streambridge.live import LiveOptions, run_live
+from ..streambridge.live import LiveOptions, monitor_live, run_live
 from ..streambridge.source import BridgeError
 from .jobs import Store, read, safe_path
 
@@ -90,7 +90,10 @@ def live(store, jid, cfg, secrets, requirements, tick):
             preview = safe_path(store.root, item["preview"])
             report = read(preview.with_name("manual_review.json"))
             clips.append({**report, "start_ms": item["start_ms"], "end_ms": item["end_ms"],
-                          "window_start_ms": item["window_start_ms"], "candidate_id": item["candidate_id"]})
+                          "window_start_ms": item["window_start_ms"], "candidate_id": item["candidate_id"],
+                          "candidate": {"start_ms": item["start_ms"], "end_ms": item["end_ms"],
+                            "ranking_method": item.get("ranking_method"), "rationale": item.get("rationale"),
+                            "transcript_excerpt": item.get("description")}})
     manifest = {"job_id": jid, "clips": clips, "candidate_count": len(result.get("ready", ())) + len(result.get("pending", ())),
                 "duration_ms": result.get("clock_ms"), "requirements": requirements.public(),
                 "count_result": requirements.export_summary(len(clips)), "analysis_status": "partial"
@@ -117,8 +120,18 @@ def main(root, jid):
                 report = rerender(safe_path(store.root, cfg["edit_path"]), store.root / "revisions",
                     start_s=cfg["start_ms"] / 1000, end_s=cfg["end_ms"] / 1000,
                     facecam_roi=cfg.get("facecam_roi"), gameplay_roi=cfg.get("gameplay_roi"), layout_plan=None,
-                    layout=cfg.get("layout"))
+                    layout=cfg.get("layout"), protected_hud_roi=cfg.get("protected_hud_roi"))
                 store.update(jid, status="completed", stage="completed", revision_report=report["review_manifest"])
+                return 0
+            if cfg["kind"] == "monitor":
+                tick("resolving_source")
+                result = monitor_live(cfg["source"], store.root / "live", rights_ref=cfg["rights_ref"], confirmed=True,
+                    seconds=cfg.get("live_seconds", 300), interval=15, job_id=jid,
+                    progress=lambda state: tick("monitoring", live_status=state.get("live_status"),
+                                               media_status=state.get("media_status")))
+                store.update(jid, status="completed", stage="completed", produced=0,
+                             progress={"live_status": result.get("live_status"), "media_status": "unavailable"},
+                             monitor_summary="Metadata only. No media was captured.")
                 return 0
             control = ClipControl.parse(cfg["requirements"])
             operation = live if cfg["kind"] == "live" else recording
@@ -127,6 +140,7 @@ def main(root, jid):
             store.update(jid, status=status, stage=status, manifest=str(path),
                          count_result=result.get("count_result"), candidate_count=result.get("candidate_count", 0),
                          produced=len(result.get("clips", [])), warnings=result.get("warnings", [])[:60],
+                         progress={"produced": len(result.get("clips", [])), "candidates": result.get("candidate_count", 0)},
                          timing=result.get("timing"))
             return 0
     except InterruptedError:

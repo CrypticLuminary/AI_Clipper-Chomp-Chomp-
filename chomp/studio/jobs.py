@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ from time import monotonic, sleep
 from uuid import uuid4
 
 from ..artifacts import artifact_lock, staged_file, write_json
-from ..clipcontrol import ClipControl
+from ..clipcontrol import ClipControl, PRESETS
 from ..streambridge.source import BridgeError, resolve
 
 ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -64,7 +65,7 @@ class Store:
         with artifact_lock(path / ".state.lock", timeout=4):
             state = read(path / "state.json") if (path / "state.json").exists() else {"id": job, "created_at": utc()}
             events = state.get("events", [])
-            if fields.get("stage") and fields["stage"] != state.get("stage"):
+            if fields.get("stage") and not any(event["stage"] == fields["stage"] for event in events):
                 events = [*events[-79:], {"stage": fields["stage"], "at": utc()}]
             state.update(fields, updated_at=utc(), events=events)
             write_json(path / "state.json", state)
@@ -98,18 +99,28 @@ class Store:
         try:
             with staged_file(path) as tmp:
                 remaining = length
+                digest = sha256()
                 with tmp.open("wb") as out:
                     while remaining:
                         data = stream.read(min(remaining, 256 * 1024))
                         if not data:
                             raise ValueError("Upload stopped before all bytes arrived")
                         out.write(data)
+                        digest.update(data)
                         remaining -= len(data)
                         if shutil.disk_usage(self.root).free < RESERVE:
                             raise ValueError("The workspace reached its free-space reserve")
-                tmp.replace(path)
-        except BaseException:
+                ident = sha256((digest.hexdigest() + ext).encode()).hexdigest()[:32]
+                shared = safe_path(self.root, self.root / "uploads" / ident)
+                with artifact_lock(self.root / ".uploads" / f"{ident}.lock", timeout=10):
+                    shared.mkdir(exist_ok=True)
+                    target = shared / path.name
+                    if not target.exists():
+                        tmp.replace(target)
             folder.rmdir()
+        except BaseException:
+            with suppress(OSError):
+                folder.rmdir()
             raise
         return {"id": ident, "name": Path(name.replace("\\", "/")).name[:180], "bytes": length}
 
@@ -121,6 +132,24 @@ class Store:
         if len(files) != 1 or (files[0].suffix == ".json") != transcript:
             raise FileNotFoundError("Upload is missing or the wrong type")
         return safe_path(folder, files[0])
+
+    def presets(self):
+        path = self.root / "presets.json"
+        with artifact_lock(self.root / ".presets.lock", timeout=4):
+            return {**PRESETS, **(read(path) if path.exists() else {})}
+
+    def save_preset(self, name, values):
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,39}", name) or name in PRESETS:
+            raise ValueError("Use a new preset name with letters, numbers, spaces, hyphens or underscores")
+        settings = ClipControl.parse(values)
+        path = self.root / "presets.json"
+        with artifact_lock(self.root / ".presets.lock", timeout=4):
+            current = read(path) if path.exists() else {}
+            if len(current) >= 30 and name not in current:
+                raise ValueError("The local preset limit is 30")
+            current[name] = {k: getattr(settings, k) for k in settings.__dataclass_fields__}
+            write_json(path, current)
+        return self.presets()
 
     def public(self, state):
         # Paths and the original provider responses are available only to the local worker.
@@ -151,6 +180,9 @@ class Store:
             start, end = ((row["start_ms"] + offset, row["end_ms"] + offset) if latest else
                           (item["start_ms"], item["end_ms"]))
             feedback = self.folder(jid) / f"feedback-{idx}.json"
+            preview_hash = row.get("artifact_sha256", {}).get("preview")
+            current_feedback = next((f for f in reversed(read(feedback)) if f.get("preview_sha256") == preview_hash),
+                                    None) if feedback.is_file() else None
             output.append({"index": idx, "candidate_id": raw.get("candidate_id"),
                 "start_ms": start, "end_ms": end, "media_duration_ms": row.get("media_duration_ms"),
                 "title": row.get("title"), "description": item.get("transcript_excerpt"),
@@ -158,7 +190,7 @@ class Store:
                 "warnings": row.get("warnings", []), "layout": row.get("layout"), "width": row.get("width"),
                 "height": row.get("height"), "has_video": bool(row.get("preview")),
                 "revision": latest["id"] if latest else None,
-                "feedback": read(feedback)[-1] if feedback.is_file() else None})
+                "feedback": current_feedback, "encoder": row.get("encoder")})
         return {"clips": output, "count_result": manifest.get("count_result"), "source_duration_ms": manifest.get("duration_ms"),
                 "requirements": manifest.get("requirements")}
 
@@ -225,9 +257,9 @@ class Manager:
         if type(timeout) is not int or not 10 <= timeout <= 7200:
             raise ValueError("Job timeout must be between 10 and 7200 seconds")
         kind = spec.get("kind", "recording")
-        if kind not in {"recording", "live"}:
+        if kind not in {"recording", "live", "monitor"}:
             raise ValueError("Select a recording or an authorized live feed")
-        if kind == "live" and (type(spec.get("live_seconds", 300)) is not int or
+        if kind in {"live", "monitor"} and (type(spec.get("live_seconds", 300)) is not int or
                                 not 1 <= spec.get("live_seconds", 300) <= 3600):
             raise ValueError("Live session time must be between 1 and 3600 seconds")
         source = spec.get("source")
@@ -235,6 +267,7 @@ class Manager:
         if any(not isinstance(v, str) or not v.startswith("https://") or len(v) > 8192 for v in secrets.values()):
             raise ValueError("Supply HTTPS creator media")
         canonical = None
+        descriptor = None
         if source:
             if not isinstance(source, str) or not source.startswith(("http://", "https://")):
                 raise ValueError("Use a Twitch/YouTube URL or attach a local recording")
@@ -242,6 +275,16 @@ class Manager:
             canonical = descriptor.canonical_url
             if descriptor.platform == "creator":
                 secrets["source"] = source
+        if kind == "monitor" and (not descriptor or descriptor.platform not in {"youtube", "twitch"} or secrets
+                                  or spec.get("upload") or spec.get("local_file") or spec.get("local_spool")):
+            raise ValueError("Monitoring requires a public YouTube video or Twitch channel URL without attached media")
+        if (kind == "recording" and descriptor and descriptor.platform in {"youtube", "twitch"} and
+                not (spec.get("upload") or spec.get("local_file") or secrets.get("media_url") or spec.get("twitch_download"))):
+            raise BridgeError("media_unavailable",
+                "Attach the creator's original recording or an authorized HTTPS file. The platform share URL supplies metadata and playback.")
+        if kind == "live" and not (secrets.get("feed_url") or secrets.get("source") or spec.get("local_spool")):
+            raise BridgeError("media_unavailable",
+                "This platform URL supports monitoring and playback. Attach a creator-authorized HLS media playlist to capture clips.")
         if not (source or spec.get("upload") or spec.get("local_file") or spec.get("local_spool") or secrets):
             raise ValueError("Supply a source or a recording")
         if spec.get("twitch_download") and (spec.get("upload") or spec.get("local_file") or secrets):
@@ -251,7 +294,7 @@ class Manager:
                   "timeout": timeout, "kind": kind, "needs_secret_url": bool(secrets)}
         return self._enqueue(config, secrets)
 
-    def revise(self, parent, clip_index, *, start_ms, end_ms, facecam_roi=None, gameplay_roi=None, layout=None):
+    def revise(self, parent, clip_index, *, start_ms, end_ms, facecam_roi=None, gameplay_roi=None, protected_hud_roi=None, layout=None):
         if type(start_ms) is not int or type(end_ms) is not int:
             raise ValueError("Boundary adjustments use integer milliseconds")
         clip = self.store.clip(parent, clip_index)
@@ -266,11 +309,12 @@ class Manager:
             requirements.check_span(start_ms, end_ms, plan["source_duration_ms"])
         elif not 0 <= start_ms < end_ms <= plan["source_duration_ms"]:
             raise ValueError("Boundaries are outside the source")
-        if any((facecam_roi, gameplay_roi, layout)):
-            ClipControl(layout=layout or "shorts", facecam_roi=facecam_roi, gameplay_roi=gameplay_roi)
+        if any((facecam_roi, gameplay_roi, protected_hud_roi, layout)):
+            ClipControl(layout=layout or "shorts", facecam_roi=facecam_roi, gameplay_roi=gameplay_roi,
+                        protected_hud_roi=protected_hud_roi)
         return self._enqueue({"kind": "revision", "parent": parent, "clip_index": clip_index,
                               "edit_path": str(edit_path), "start_ms": start_ms, "end_ms": end_ms,
-                              "facecam_roi": facecam_roi, "gameplay_roi": gameplay_roi, "layout": layout,
+                              "facecam_roi": facecam_roi, "gameplay_roi": gameplay_roi, "protected_hud_roi": protected_hud_roi, "layout": layout,
                               "timeout": 900}, {})
 
     def _enqueue(self, config, secrets, retry_of=None):
