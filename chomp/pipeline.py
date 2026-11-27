@@ -75,7 +75,7 @@ def process(
     editorial_provider: EditorialProvider | None = None, semantic_budget: int = 12,
     saliency_model: Path | None = None, camera_slot: str = "top", person_model: Path | None = None,
     camera_motion: str = "pan", camera_fit: str = "auto",
-    burn_hook: bool = False, evolution: EvolutionConfig | None = None, evolution_provider=None,
+    burn_hook: bool = False, evolution: EvolutionConfig | None = None, evolution_provider=None, source_link: dict | None = None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -95,7 +95,9 @@ def process(
     duration_ms = meta["duration_ms"]
     check_audio_track(meta, audio_stream)
     source_id = source_identity(media)
-    source_stat = media.stat() if evolution is not None else None
+    if source_link is not None and source_link.get("media_id", source_id) != source_id:
+        raise ValueError("The attached recording changed since acquisition")
+    source_stat = media.stat() if evolution is not None or source_link is not None else None
     cache = output_root / ".analysis"
     internal_asr = transcribe and transcript_path is None
     caption_asr = render and limit > 0 and (refine_captions or internal_asr)
@@ -129,6 +131,8 @@ def process(
         "editorial_provider": provider.fingerprint if provider else None, "semantic_budget": semantic_budget,
         "camera_slot": camera_slot, "burn_hook": burn_hook,
     }
+    if source_link is not None:
+        config["source_link"] = source_link
     if evolution is not None:
         config["evolution"] = evolution.fingerprint()
         config["evolution_provider"] = evolution_provider.fingerprint if evolution_provider and limit else None
@@ -368,6 +372,7 @@ def process(
                                 layout_override=overrides,
                                 shorts_style=layout == "shorts",
                                 title=title, title_source="cited_dialogue", burn_hook=burn_hook,
+                                **({"source_link": source_link} if source_link is not None else {}),
                             )
                         except (OSError, ValueError, RuntimeError) as exc:
                             if evolution is None:
@@ -398,6 +403,8 @@ def process(
                     ledger = {"schema_version": "chomp-candidates/1", "job_id": job_id, "source_id": source_id,
                               "source": str(media), "duration_ms": duration_ms, "proposals_per_hour": proposals_per_hour,
                               "candidates": [row for _, row in records], "timing": diagnostics}
+                    if source_link is not None:
+                        ledger["source_link"] = source_link
                     write_json(work / "candidates.json", ledger)
                     if evolution_report is not None:
                         write_json(work / "evolution_evidence.json", evolution_report)
@@ -425,6 +432,8 @@ def process(
                             evolution_artifact_sha256={item.name: digest_file(item) for item in work.iterdir()
                                                        if item.name in {"candidates.json", "evolution_evidence.json",
                                                                         "review.html", "transcript.json"}})
+                    if source_link is not None:
+                        manifest["source_link"] = source_link
                     write_json(work / manifest_path.name, manifest)
                     if job_dir.exists():
                         raise FileExistsError(f"An incomplete job already exists at {job_dir}. Choose a new output folder.")
