@@ -17,7 +17,7 @@ from .models import Candidate
 from .ranking import overlap_ratio
 from .research_interfaces import evidence_item
 
-VERSION = "evolution/4"
+VERSION = "evolution/5"
 PROFILES = {"eco": (8, 2500, 2800, 2800), "balanced": (16, 1250, 5600, 5600),
             "gpu": (24, 750, 9000, 9000)}
 LANES = ("dialogue", "acoustic", "visual", "chat", "exploration")
@@ -49,7 +49,7 @@ class EvolutionConfig:
             raise ValueError("Unknown EVOLUTION profile or disabled component")
         if not 1_000 <= self.min_ms <= self.max_ms <= 60_000:
             raise ValueError("EVOLUTION duration must be 1–60 seconds with minimum no greater than maximum")
-        if not 1 <= self.memory_mb <= 1024 or not 2 <= self.reasoning_calls <= 60 or not 10 <= self.reasoning_seconds <= 3600:
+        if not 1 <= self.memory_mb <= 1024 or not 2 <= self.reasoning_calls <= 120 or not 10 <= self.reasoning_seconds <= 3600:
             raise ValueError("EVOLUTION memory/call/time budgets are out of range")
         if any(value is not None and not 1 <= value <= 12_000 for value in (self.max_frames, self.max_audio_windows)):
             raise ValueError("EVOLUTION frame and audio sample limits must be 1–12000")
@@ -95,7 +95,7 @@ def build_evidence(identity, transcript, turns, observations, asr, audio_stream,
     return rows
 
 
-def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budget: int, maximum: int):
+def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budget: int, maximum: int, scope: tuple[int, int] | None = None):
     utterances = memory.utterances
     tokens = {r["id"]: set(terms(r["text"])) for r in utterances}
     units = []
@@ -114,6 +114,8 @@ def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budg
         return children, start, end
 
     def add(proposal):
+        if scope and not scope[0] <= proposal.start_ms < proposal.end_ms <= scope[1]:
+            return
         key = proposal.core_ids or (f"{proposal.start_ms}:{proposal.end_ms}",)
         lanes = candidates.setdefault(key, {})
         if proposal.lane not in lanes or lanes[proposal.lane].strength < proposal.strength:
@@ -237,9 +239,30 @@ def segment_and_discover(memory: Memory, identity: dict, enabled: set[str], budg
             for key in allotted], units
 
 
+def diversify(proposals, duration, capacity):
+    """Spread costly first-pass reads across the timeline while retaining rank preference."""
+    if not proposals or capacity <= 1:
+        return proposals
+    first = proposals[0]
+    touched = {first.anchor * capacity // max(duration, 1)}
+    selected = [first]
+    for proposal in sorted(proposals[1:], key=lambda p: (-p.strength, p.start_ms)):
+        bucket = proposal.anchor * capacity // max(duration, 1)
+        if bucket not in touched:
+            selected.append(proposal)
+            touched.add(bucket)
+        if len(selected) >= capacity:
+            break
+    seen = {id(p) for p in selected}
+    return selected + [p for p in proposals if id(p) not in seen]
+
+
 def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, duration: int, cache: Path,
                   transcript, turns, observations, audio, audio_stream: int, audio_hop: int,
-                  asr: dict, provider, proposals_per_hour: int, limit: int, min_score: float):
+                  asr: dict, provider, proposals_per_hour: int, limit: int, min_score: float,
+                  requirements=None, progress=None):
+    tick = progress or (lambda stage, **info: None)
+    scope = requirements.source_range(duration) if requirements else None
     identity = {"source_id": source_id, "duration_ms": duration}
     enabled = set(LANES) - set(config.disabled)
     batch, interval, frame_cap, audio_cap = PROFILES[config.profile]
@@ -294,8 +317,12 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
             states["dense"] = {"state": "failed", "reason": str(exc)}
     timings["embedding_seconds"] = round(perf_counter() - started, 3)
     started = perf_counter()
+    tick("discovering")
+    minimum_proposals = max(8, limit * (8 if requirements and requirements.mode == "TARGET" else 4)) if requirements or limit > 3 else 8
     proposals, units = segment_and_discover(memory, identity, enabled,
-                                            min(240, max(8, ceil(duration * proposals_per_hour / 3_600_000))), config.max_ms)
+        min(240, max(minimum_proposals, ceil(duration * proposals_per_hour / 3_600_000))), config.max_ms, scope)
+    if provider:
+        proposals = diversify(proposals, duration, min(len(proposals), max(1, config.reasoning_calls // 2)))
     timings["discovery_seconds"] = round(perf_counter() - started, 3)
     reasoner = Reasoner(provider, cache, config.reasoning_calls, config.reasoning_seconds) if provider and limit else None
     interest = None
@@ -304,11 +331,12 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
         interest = load_model(config.model)
     records = []
     started = perf_counter()
-    for proposal in proposals:
+    for index, proposal in enumerate(proposals):
+        tick("investigating", candidates=len(proposals), investigated=index)
         candidate_id = artifact_key([VERSION, source_id, proposal.lane, proposal.core_ids, proposal.start_ms, proposal.end_ms])[:24]
         analysis = investigate(memory, proposal, "memory" not in config.disabled, "hybrid" not in config.disabled)
         decision = _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, config, identity,
-                           audio, audio_hop, min_score, interest)
+                           audio, audio_hop, min_score, interest, requirements, tick)
         records.append(decision)
     timings["investigation_seconds"] = round(perf_counter() - started, 3)
     selected = []
@@ -339,8 +367,10 @@ def run_evolution(config: EvolutionConfig, *, source: Path, source_id: str, dura
 
 
 def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, config, identity,
-            audio, audio_hop, min_score, interest):
+            audio, audio_hop, min_score, interest, requirements=None, tick=lambda stage, **info: None):
     duration = identity["duration_ms"]
+    bounds = requirements.source_range(duration) if requirements else None
+    preferred = requirements.preferred if requirements else None
     core = memory.hydrate(proposal.core_ids)
     dialogue = " ".join(r["text"] for r in core if r["modality"] == "utterance")
     score = min(100., round(proposal.strength * 100, 2))
@@ -397,8 +427,10 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
             state, note = "rejected", "Local discovery found weak evidence of a standalone moment"
 
     if state in {"eligible", "verify"}:
+        tick("optimizing_boundaries")
         boundary, alternatives = close(memory, proposal, groups, duration=duration, minimum=min(duration, config.min_ms),
-                                       maximum=config.max_ms, audio=audio, hop=audio_hop, snap="snap" not in config.disabled)
+                                       maximum=config.max_ms, audio=audio, hop=audio_hop, snap="snap" not in config.disabled,
+                                       preferred=preferred, bounds=bounds)
         if boundary is None:
             state, note = "unresolved", "No contiguous interval covers the core and required viewer context"
     if state == "verify":
@@ -439,6 +471,8 @@ def _assess(memory, proposal, candidate_id, analysis, reasoner, source, cache, c
         start, end = proposal.start_ms, proposal.end_ms
     cut_text = " ".join(row["text"] for row in memory.around(start, end)
                         if start <= row["start_ms"] and row["end_ms"] <= end)
+    if state == "eligible" and requirements and not requirements.permits_text(cut_text):
+        state, note = "rejected", "The transcript includes an excluded content preference"
     candidate = Candidate(start, end, proposal.anchor, transcript_excerpt=cut_text[:2200], score=score,
                           ranking_method=method, rationale=note, missing_context=state != "eligible",
                           requires_visual_verification=proposal.lane != "visual" or state != "eligible")

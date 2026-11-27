@@ -10,6 +10,7 @@ from time import perf_counter
 
 from .artifacts import artifact_key, artifact_lock, digest_file, source_identity, write_json
 from .asr import LocalTranscriber
+from .clipcontrol import ClipControl
 from .clipwork import SCHEMA, create_clip, read_layout_plan, review_page
 from .framing import FramingPlan, facecam_fingerprint, plan_framing
 from .media import RENDER_VERSION, check_audio_track, probe
@@ -36,7 +37,7 @@ def render_manual_preview(
     saved_framing: FramingPlan | None = None, title_source: str | None = "editor",
     sound_cues_path: Path | None = None, saved_sound_cues: list[dict] | None = None,
     subject_plan_path: Path | None = None, streamer_anchor: StreamerAnchor | None = None,
-    source_link: dict | None = None,
+    source_link: dict | None = None, requirements: ClipControl | None = None,
 ) -> dict:
     started = perf_counter()
     if not rights_ref.strip():
@@ -49,6 +50,8 @@ def render_manual_preview(
     start_ms, end_ms = round(start_s * 1000), round(end_s * 1000)
     duration_ms = meta["duration_ms"]
     checked_span(start_ms, end_ms, duration_ms)
+    if requirements:
+        requirements.check_span(start_ms, end_ms, duration_ms)
     check_audio_track(meta, audio_stream)
     source_id = source_identity(source)
     if (expected_source_id and source_id != expected_source_id) or (
@@ -94,6 +97,8 @@ def render_manual_preview(
         config["facecam_detector"] = facecam_fingerprint(facecam_model)
     if source_link is not None:
         config["source_link"] = source_link
+    if requirements:
+        config["requirements"] = asdict(requirements)
     job_id = "manual-" + artifact_key(config)[:24]
     output = output_root / job_id
     manifest = output / "manual_review.json"
@@ -135,6 +140,7 @@ def render_manual_preview(
                 shorts_style=layout == "shorts",
                 title=title, title_source=title_source, burn_hook=burn_hook, sound_cues=mix,
                 **({"source_link": source_link} if source_link is not None else {}),
+                **({"requirements": requirements} if requirements is not None else {}),
             )
             report = {
                 **clip, "schema_version": SCHEMA, "job_id": job_id, "source": str(source), "source_id": source_id,
@@ -158,7 +164,7 @@ def rerender(
     profile: str | None = None, caption_position: str | None = None, audio_profile: str | None = None,
     layout_plan: Path | None = None, captions_override: Path | None = None,
     title: str | None = None, burn_hook: bool | None = None,
-    sound_cues_path: Path | None = None,
+    sound_cues_path: Path | None = None, facecam_roi=None, gameplay_roi=None, layout: str | None = None,
 ) -> dict:
     plan = json.loads(edit_path.read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or plan.get("schema_version") != SCHEMA:
@@ -188,7 +194,7 @@ def rerender(
     if layout_plan is None and isinstance(segments, list) and len(segments) == 1 and not segments[0].get("gameplay_path"):
         segments = [{**segments[0], "start_ms": round(start * 1000), "end_ms": round(end * 1000)}]
     saved_framing = None
-    if layout_plan is None and same_bounds:
+    if layout_plan is None and same_bounds and not (layout or facecam_roi or gameplay_roi):
         roi = plan.get("facecam_roi_px")
         saved_framing = FramingPlan(plan["layout"], tuple(roi) if roi else None,
                                     plan.get("facecam_detection"), warnings=tuple(plan.get("framing_warnings", ())),
@@ -198,12 +204,15 @@ def rerender(
         expected_source_id=plan["source_id"], transcript_path=transcript, audio_stream=plan["audio_stream"],
         profile=profile or plan["profile"], caption_position=caption_position or plan["caption_position"],
         audio_profile=audio_profile or plan["audio_profile"], captions_override=captions_override,
-        layout_plan=layout_plan, layout_segments_override=segments if layout_plan is None else None,
-        layout="shorts" if plan.get("shorts_style") else "auto",
+        layout_plan=layout_plan, layout_segments_override=segments if layout_plan is None and not (
+            layout or facecam_roi or gameplay_roi) else None,
+        layout=layout or ("shorts" if plan.get("shorts_style") else "auto"),
+        facecam_roi=facecam_roi, gameplay_roi=gameplay_roi,
         title=title if title is not None else plan.get("title"),
         title_source="editor" if title is not None else plan.get("title_source"),
         burn_hook=plan.get("burn_hook", False) if burn_hook is None else burn_hook,
         parent_edit=digest_file(edit_path), saved_framing=saved_framing,
         sound_cues_path=sound_cues_path, saved_sound_cues=plan.get("sound_cues"),
         source_link=plan.get("source_link"),
+        requirements=ClipControl.parse(plan["requirements"]) if plan.get("requirements") else None,
     )

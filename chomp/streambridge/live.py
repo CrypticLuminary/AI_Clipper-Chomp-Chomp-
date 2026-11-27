@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 from ..artifacts import artifact_key, digest_file, staged_file, write_json
 from ..asr import LocalTranscriber
 from ..evolution import EvolutionConfig
+from ..clipcontrol import ClipControl, MAX_CLIPS
 from ..manual import render_manual_preview
 from ..media import check_audio_track, exec_checked, probe
 from ..pipeline import process
@@ -52,13 +53,21 @@ class LiveOptions:
     asr_model: str | None = None
     asr_device: str = "cpu"
     render: bool = False
+    requirements: ClipControl | None = None
+    evolution: EvolutionConfig | None = None
+    provider: object | None = None
 
     def __post_init__(self):
+        if self.requirements:
+            req = self.requirements
+            for field, value in {"max_clips": req.clips, "min_ms": req.bounds[0], "max_ms": req.bounds[1],
+                "audio_stream": req.audio_stream, "layout": req.layout, "hardware_profile": req.hardware}.items():
+                object.__setattr__(self, field, value)
         if (not 8 <= self.context_seconds <= self.retention_seconds <= 3600 or
                 not 0 <= self.lookahead_seconds < self.context_seconds or
                 not .1 <= self.poll_seconds <= 30 or not 1 <= self.max_seconds <= 21600 or
                 not self.poll_seconds <= self.idle_seconds <= 600 or not 1 <= self.max_buffer_bytes <= 16 * 1024**3 or
-                type(self.max_clips) is not int or not 0 <= self.max_clips <= 3 or
+                type(self.max_clips) is not int or not 0 <= self.max_clips <= MAX_CLIPS or
                 not 1000 <= self.min_ms <= self.max_ms <= 60_000 or
                 self.audio_stream < 0 or (self.start_ms is not None and self.start_ms < 0)):
             raise BridgeError("invalid_limit", "Live retention, lookahead, timing, disk or clip settings are invalid.")
@@ -292,14 +301,25 @@ class RollingBuffer:
         self._window(rows, work, joined)
         start = rows[0]["start_ms"]
         transcript = work / "local-transcript.json"
-        write_json(transcript, {"segments": window_transcript(rows, start, probe(joined)["duration_ms"])})
+        duration = probe(joined)["duration_ms"]
+        control = o.requirements
+        if control:
+            lower = max(0, (control.source_start_ms or 0) - start)
+            upper = min(duration, control.source_end_ms - start) if control.source_end_ms is not None else duration
+            if upper - lower < control.bounds[0]:
+                joined.unlink(missing_ok=True)
+                self._prune_inactive(work)
+                return
+            control = replace(control, source_start_ms=lower, source_end_ms=upper)
+        write_json(transcript, {"segments": window_transcript(rows, start, duration)})
         ready_candidates = []
         keep = False
         try:
             result = process(joined, work / "analysis", rights_ref=self.rights_ref, transcript_path=transcript,
-                             render=False, limit=3, audio_stream=self.options.audio_stream, layout=o.layout,
-                             profile=o.profile, evolution=EvolutionConfig(profile=o.hardware_profile,
-                                min_ms=o.min_ms, max_ms=o.max_ms, disabled=("acoustic",)),
+                             render=False, limit=o.max_clips, audio_stream=self.options.audio_stream, layout=o.layout,
+                             profile=o.profile, evolution=o.evolution or EvolutionConfig(profile=o.hardware_profile,
+                                min_ms=o.min_ms, max_ms=o.max_ms), evolution_provider=o.provider,
+                             requirements=control,
                              source_link={"schema_version": "chomp-source-link/1", "source": self.source.reference(),
                                           "method": "rolling_buffer", "timeline": self.clock.source,
                                           "window_start_ms": start})
@@ -325,7 +345,10 @@ class RollingBuffer:
                     rendered = render_manual_preview(joined, self.folder / "review", start_s=c["start_ms"] / 1000,
                         end_s=c["end_ms"] / 1000, rights_ref=self.rights_ref, audio_stream=self.options.audio_stream,
                         layout=o.layout, profile=o.profile, transcript_path=transcript,
-                        source_link=result.get("source_link"))
+                        facecam_roi=control.facecam_roi if control else None, gameplay_roi=control.gameplay_roi if control else None,
+                        audio_profile=control.audio_profile if control else "original",
+                        caption_position=control.caption_position if control else "lower",
+                        source_link=result.get("source_link"), requirements=control)
                     keep = True
                     candidate["review_page"] = rendered["review_page"]
                     candidate["preview"] = rendered["preview"]

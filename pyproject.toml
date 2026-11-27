@@ -34,6 +34,7 @@ version = {attr = "chomp.__version__"}
 
 [tool.setuptools.package-data]
 chomp = ["assets/*.onnx", "assets/*-LICENSE.txt", "director/contracts/*.schema.json"]
+"chomp.studio" = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -11,10 +11,11 @@ import re
 from urllib.parse import quote
 
 from .artifacts import digest_file, write_json, write_text
+from .clipcontrol import ClipControl
 from .captions import CaptionResult, build_captions
 from .editorial import quote_title, validate_title
 from .framing import FramingPlan
-from .media import LayoutSegment, crop_position, exported_audio_level, exported_loudness, render_preview
+from .media import LayoutSegment, crop_position, exported_audio_level, exported_loudness, probe, render_preview
 from .models import TranscriptSegment, checked_span
 from .sound import SoundCue, cues_in_range
 
@@ -99,11 +100,14 @@ def create_clip(
     shorts_style: bool = False,
     title: str | None = None, title_source: str | None = None, burn_hook: bool = False,
     sound_cues: tuple[SoundCue, ...] = (), source_link: dict | None = None,
+    requirements: ClipControl | None = None,
 ) -> dict:
     checked_span(start_ms, end_ms, duration_ms)
     if profile not in PROFILES:
         raise ValueError("Choose the preview or final export profile")
-    width, height = PROFILES[profile]
+    width, height = requirements.dimensions if requirements else PROFILES[profile]
+    if requirements:
+        requirements.check_span(start_ms, end_ms, duration_ms)
     warnings = list(framing.warnings)
     if layout_override is not None:
         segments = layout_segments(layout_override, start_ms, end_ms)
@@ -132,8 +136,10 @@ def create_clip(
         title = validate_title(title)
     captions = (_caption_override(captions_override, end_ms - start_ms, shorts_style=shorts_style) if captions_override else
                 build_captions(transcript, start_ms, end_ms, duration_ms))
+    if requirements and not requirements.captions:
+        captions = CaptionResult("", 0, "disabled", ())
     warnings.extend(captions.warnings)
-    if not captions.count:
+    if not captions.count and (not requirements or requirements.captions):
         warnings.append("No captions for this interval. Confirm whether speech requires subtitles.")
     if cues_in_range(sound_cues, start_ms, end_ms):
         warnings.append("Check the timing and level of the added sound cues during playback.")
@@ -160,6 +166,8 @@ def create_clip(
     }
     if source_link is not None:
         plan["source_link"] = source_link
+    if requirements:
+        plan["requirements"] = asdict(requirements)
     if framing.detection:
         plan["facecam_detection"] = framing.detection
     if framing.subject_tracking is not None:
@@ -171,6 +179,7 @@ def create_clip(
     mean = None
     loudness = None
     preview_hash = None
+    measured_duration = None
     audio_warning = False
     if render:
         mp4 = work / mp4_name
@@ -178,6 +187,12 @@ def create_clip(
                        captions_path=srt, audio_stream=audio_stream, segments=segments,
                        caption_position=caption_position, audio_profile=audio_profile, shorts=shorts_style,
                        hook=title if burn_hook else None, sound_cues=sound_cues)
+        if requirements:
+            measured_duration = probe(mp4)["duration_ms"]
+            lo, hi = requirements.bounds
+            # The source interval is exact. Allow only normal frame/AAC mux quantization.
+            if not lo - 100 <= measured_duration <= hi + 100:
+                raise RuntimeError("The encoded clip duration exceeds the requested tolerance")
         measured = exported_audio_level(mp4)
         mean = measured if math.isfinite(measured) else None
         audio_warning = mean is None or mean < -55
@@ -192,6 +207,7 @@ def create_clip(
         "preview": str(published / mp4_name) if render else None,
         "edit_spec": str(published / edit_name),
         "captions_srt": str(published / srt_name) if srt else None,
+        **({"media_duration_ms": measured_duration, "width": width, "height": height} if requirements else {}),
         "caption_cues": captions.count, "caption_timing": captions.timing, "audio_mean_dbfs": mean,
         "audio_warning": audio_warning, "loudness": loudness, "review_status": "pending",
         "layout_review_required": bool(framing.warnings or layout_override or has_gameplay_crop),
